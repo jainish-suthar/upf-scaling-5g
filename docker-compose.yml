@@ -1,0 +1,94 @@
+# Run: NUM_UES=1 docker compose up -d     (subscribers are seeded from config/subs.js)
+# Two UPFs: UPF_N4_IPS="10.10.2.20 10.10.2.21" docker compose --profile scale up -d   (SMF lists both; upf2 only starts with the profile)
+# Baseline: 1 UPF. N2/N3 = 10.10.1.0/24, N4 = 10.10.2.0/24, N6 = 10.10.3.0/24
+x-tun: &tun
+  cap_add: [NET_ADMIN]
+  devices: [/dev/net/tun]
+
+x-upf: &upf
+  image: o5gs-base
+  <<: *tun
+  command: sh /config/upf.sh
+  cpu_period: 10000                  # 10 ms periods keep CPU throttling smooth
+  cpu_quota: ${UPF_QUOTA:-2500}      # 2500 = 0.25 core
+  sysctls: {net.ipv4.ip_forward: 1}
+  volumes: ["./config:/config:ro"]
+
+services:
+  mongo:
+    image: mongo:6
+    environment: {MONGO_INITDB_DATABASE: open5gs}
+    volumes: ["./config/subs.js:/docker-entrypoint-initdb.d/subs.js:ro"]   # seeds subscribers on first start
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "open5gs", "--eval", "quit(db.subscribers.countDocuments() > 0 ? 0 : 1)"]
+      interval: 2s
+      retries: 60
+    networks: [db]
+
+  core:                       # all control-plane NFs (NRF, SCP, AMF, SMF, UDM, UDR, AUSF, PCF, NSSF)
+    build: images/open5gs
+    image: o5gs-base
+    command: sh /config/core.sh
+    environment:
+      N2_IP: 10.10.1.10
+      N4_IP: 10.10.2.10
+      UPF_N4_IPS: ${UPF_N4_IPS:-10.10.2.20}
+    volumes: ["./config:/config:ro"]
+    healthcheck:                # healthy once the AMF listens for NGAP (SCTP 38412)
+      test: ["CMD-SHELL", "grep -q 38412 /proc/net/sctp/eps"]
+      interval: 2s
+      retries: 90
+    networks:
+      db:
+      n2n3: {ipv4_address: 10.10.1.10}
+      n4:   {ipv4_address: 10.10.2.10}
+    depends_on: {mongo: {condition: service_healthy}}
+
+  upf1:
+    <<: *upf
+    environment: {N3_IP: 10.10.1.20, N4_IP: 10.10.2.20, N6_IP: 10.10.3.20}
+    ports: ["9091:9090"]      # metrics
+    networks:
+      n2n3: {ipv4_address: 10.10.1.20}
+      n4:   {ipv4_address: 10.10.2.20}
+      n6:   {ipv4_address: 10.10.3.20}
+
+  upf2:
+    <<: *upf
+    profiles: [scale]
+    environment: {N3_IP: 10.10.1.21, N4_IP: 10.10.2.21, N6_IP: 10.10.3.21}
+    ports: ["9092:9090"]
+    networks:
+      n2n3: {ipv4_address: 10.10.1.21}
+      n4:   {ipv4_address: 10.10.2.21}
+      n6:   {ipv4_address: 10.10.3.21}
+
+  dn:                         # data network: 60 iperf3 servers (ports 5201-5260), one per UE
+    image: o5gs-base
+    command: sh -c 'for p in $$(seq 5201 5260); do iperf3 -s -D -p $$p; done; sleep infinity'
+    networks:
+      n6: {ipv4_address: 10.10.3.30}
+
+  gnb:
+    build: images/ueransim
+    image: ueransim
+    command: ./nr-gnb -c /config/gnb.yaml
+    volumes: ["./config:/config:ro"]
+    depends_on: {core: {condition: service_healthy}}
+    networks:
+      n2n3: {ipv4_address: 10.10.1.30}
+
+  ue:
+    image: ueransim
+    <<: *tun
+    command: sh -c "sleep 8 && ./nr-ue -c /config/ue.yaml -n ${NUM_UES:-1} && sleep infinity"
+    volumes: ["./config:/config:ro"]
+    depends_on: [gnb]
+    networks:
+      n2n3: {ipv4_address: 10.10.1.31}
+
+networks:
+  db:
+  n2n3: {ipam: {config: [{subnet: 10.10.1.0/24}]}}
+  n4:   {ipam: {config: [{subnet: 10.10.2.0/24}]}}
+  n6:   {ipam: {config: [{subnet: 10.10.3.0/24}]}}

@@ -43,8 +43,8 @@ plot.py                CSVs -> graphs
 Every second: read each active UPF's CPU (cgroup/`docker stats`) and session count.
 - **Scale up:** UPF1 CPU above the high threshold for N seconds → start UPF2. It joins the SMF over PFCP.
 - **Scale down:** total load below the low threshold (well under the high one) for M seconds → retire UPF2:
-  1. Stop sending it new sessions (release its PFCP association, or take it out of selection — to be confirmed).
-  2. Wait for its sessions to end (or release them so the UEs re-establish on UPF1).
+  1. The SMF cannot be told to stop picking UPF2 (stock Open5GS has no such switch), so new sessions may still land there.
+  2. Wait for UPF2's sessions to end (UEs must detach cleanly).
   3. Stop the UPF2 container only when it has 0 sessions, so no live session is cut.
 - Two thresholds (high/low), a hold time and a cooldown stop flapping. Every decision is logged with a timestamp.
 

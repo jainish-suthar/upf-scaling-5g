@@ -2,7 +2,7 @@
 """Load sweep.  usage: python3 sweep.py results/name.csv 1x10 2x10 4x10 ...
 Each step NxR = N active UEs, each sending R Mbit/s of UDP through the UPF(s) to the data network.
 UEs are added as needed (they stay registered between steps)."""
-import csv, json, os, re, statistics, subprocess, sys, time, urllib.request
+import csv, http.client, json, os, random, re, socket, statistics, subprocess, sys, time, urllib.request
 
 P, DN, DUR, WARM, COOL = "upf-scaling-5g-", "10.10.3.30", 15, 3, 5
 PING_HZ = 5
@@ -40,14 +40,34 @@ def running():
     return [c for c in ("upf1", "upf2") if run("docker", "ps", "-q", "-f", f"name={P}{c}-1")]
 
 
+SOCK = next((p for p in (os.path.expanduser("~/.docker/run/docker.sock"), "/var/run/docker.sock") if os.path.exists(p)), None)
+
+
+def api(path):                   # Docker Engine API over its unix socket: stats are read by the daemon, not by a process inside the container
+    class U(http.client.HTTPConnection):
+        def connect(self):
+            self.sock = socket.socket(socket.AF_UNIX)
+            self.sock.connect(SOCK)
+    c = U("localhost", timeout=10)
+    c.request("GET", path)
+    return json.loads(c.getresponse().read())
+
+
+def stats(c):
+    return api(f"/containers/{P}{c}-1/stats?stream=false&one-shot=true")
+
+
 def cpu_stat(c):                 # (cpu microseconds used, CFS periods, periods throttled)
-    t = run(*dx(c, "cat", "/sys/fs/cgroup/cpu.stat"))
-    return tuple(int(re.search(k + r" (\d+)", t).group(1)) for k in ("usage_usec", "nr_periods", "nr_throttled"))
+    s = stats(c)
+    return (s["cpu_stats"]["cpu_usage"]["total_usage"] // 1000,
+            s["cpu_stats"]["throttling_data"]["periods"], s["cpu_stats"]["throttling_data"]["throttled_periods"])
 
 
-def cap(c):                      # cores allowed by the cgroup quota (None = unlimited)
-    q = run(*dx(c, "cat", "/sys/fs/cgroup/cpu.max")).split()
-    return None if q[0] == "max" else int(q[0]) / int(q[1])
+def cap(c):                      # cores allowed by the CPU quota (None = unlimited)
+    h = api(f"/containers/{P}{c}-1/json")["HostConfig"]
+    if h.get("NanoCpus"):
+        return h["NanoCpus"] / 1e9
+    return h["CpuQuota"] / h["CpuPeriod"] if h.get("CpuQuota") else None
 
 
 def devs(c):                     # (N3 device, N6 device) inside a UPF container
@@ -55,10 +75,13 @@ def devs(c):                     # (N3 device, N6 device) inside a UPF container
     return tuple(re.search(r"\d+: (\S+)\s+inet " + re.escape(p), a).group(1) for p in ("10.10.1.", "10.10.3."))
 
 
-def pkts_in_out(c):              # packets received on N3 / sent on N6
-    d3, d6 = devs(c)
-    rd = lambda d, k: int(run(*dx(c, "cat", f"/sys/class/net/{d}/statistics/{k}_packets")))
-    return rd(d3, "rx"), rd(d6, "tx")
+_DEVS = {}
+
+
+def pkts_in_out(c):              # packets received on N3 / sent on N6 (interface names looked up once, counters read via the API)
+    d3, d6 = _DEVS.setdefault(c, devs(c))
+    n = stats(c)["networks"]
+    return n[d3]["rx_packets"], n[d6]["tx_packets"]
 
 
 def sessions(c):
@@ -74,6 +97,16 @@ def alive(ts):                          # tunnels that really carry traffic (a U
     return [t for t, p in ps if p.wait() == 0]
 
 
+HEALED = [0]
+
+
+def power():
+    try:
+        return run("pmset", "-g", "batt").split("\n")[0].replace("Now drawing from ", "").strip("' ")
+    except Exception:
+        return ""
+
+
 def reset_iperf():                      # hung iperf3 clients/servers (stalled control connection under loss) corrupt later steps
     run(*dx("ue", "pkill", "-9", "iperf3"))
     run(*dx("dn", "sh", "-c", "pkill -9 iperf3; for p in $(seq 5201 5260); do iperf3 -s -D -p $p; done"))
@@ -85,6 +118,7 @@ def step(n, rate, upfs, idle=0):
     time.sleep(2)
     good = alive(tuns())
     if len(good) < n:                   # overload can kill UEs' radio links: restart the UE container and re-register
+        HEALED[0] += 1                  # recorded per row: a restart reshuffles sessions between UPFs
         subprocess.run(["docker", "restart", P + "ue-1"], capture_output=True)
         for _ in range(90):
             time.sleep(1)
@@ -137,7 +171,8 @@ def step(n, rate, upfs, idle=0):
            "loss_pct": round(100 * lost / pkts, 2) if pkts else 100.0,
            "jitter_ms": round(statistics.mean(jit), 3) if jit else "",
            "rtt_avg_ms": round(statistics.mean(rtts), 2), "rtt_p95_ms": round(rtts[int(0.95 * (len(rtts) - 1))], 2),
-           "rtt_max_ms": round(rtts[-1], 2), "iperf_failed": bad, "dead_tunnels": len(tuns()) - len(good)}
+           "rtt_max_ms": round(rtts[-1], 2), "iperf_failed": bad, "dead_tunnels": len(tuns()) - len(good),
+           "ue_restarts": HEALED[0], "host_load1": round(os.getloadavg()[0], 2), "power": power()}
     for c in ("upf1", "upf2"):
         if c in upfs:
             w = cpu[c][WARM:]                                           # drop warm-up seconds
@@ -167,22 +202,30 @@ def main():
         v = int(a[i + 1])
         del a[i:i + 2]
         return v
-    idle, reps, rep0 = opt("--idle", 0), opt("--reps", 1), opt("--rep0", 0)
+    idle, reps, rep0, seed = opt("--idle", 0), opt("--reps", 1), opt("--rep0", 0), opt("--shuffle", None)
     out, steps = a[0], [tuple(map(float, s.split("x"))) for s in a[1:]]
     os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
     new = not os.path.exists(out)
-    for rep, (n, rate) in [(r + 1, st) for r in range(reps) for st in steps]:
-        row = {"rep": rep + rep0, "idle_ues": idle, **step(int(n), rate, running(), idle)}
+    plan = [(r + 1, st) for r in range(reps) for st in steps]
+    if seed is not None:                # randomized order removes load-vs-time confounding
+        random.Random(seed).shuffle(plan)
+    for rep, (n, rate) in plan:
+      for attempt in range(1, 4):       # a step with a failed iperf3 client is retried; every attempt is kept, flagged valid=0
+        row = {"rep": rep + rep0, "attempt": attempt, "idle_ues": idle, "t": round(time.time(), 1), **step(int(n), rate, running(), idle)}
+        row["valid"] = int(row["iperf_failed"] == 0 and row["dead_tunnels"] == 0)
         with open(out, "a", newline="") as f:
             w = csv.DictWriter(f, fieldnames=list(row))
             if new:
                 w.writeheader()
                 new = False
             w.writerow(row)
+        print(f"valid={row['valid']} try={attempt} ", end="")
         print(f"r{row['rep']} {row['ues']:>3} UEs x {row['rate_mbps']:g}M  off={row['offered_mbps']:g}  thr={row['throughput_mbps']}  "
               f"loss={row['loss_pct']}%  rtt={row['rtt_avg_ms']}/{row['rtt_p95_ms']}ms  upf1_cpu={row['upf1_cpu_pct']}% thr%={row['upf1_throttled_pct']}  "
               f"sess={row['upf1_sessions']}  upf_inside_loss={row['upf1_inside_loss_pct']}%  gnb={row['gnb_cores']} ue={row['ue_cores']} cores", flush=True)
         time.sleep(COOL)
+        if row["valid"]:
+            break
 
 
 if __name__ == "__main__":

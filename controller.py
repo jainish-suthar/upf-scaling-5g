@@ -8,10 +8,12 @@ import csv, os, re, subprocess, sys, time
 from collections import deque
 from sweep import P, cap, cpu_stat, run, running, sessions
 
-# Set from results/threshold.csv (medians of 3 runs): degradation starts at ~100 Mbit/s offered, where UPF CPU is ~45% of its
-# cap and ~15% of 10 ms periods are throttled. Loss is too noisy between runs to use as a trigger.
-UP_THROTTLED, UP_CPU, UP_HOLD = 15.0, 45.0, 5     # % of periods throttled / % of cap, seconds
-DOWN_SUM_CPU, DOWN_HOLD = 25.0, 20                # total CPU (% of one cap) of all UPFs; one UPF alone would then sit well below UP_CPU
+# PROVISIONAL, from results/threshold.csv (CPU/throttling read via the Docker API, 4 runs per load, 20-200 Mbit/s offered):
+# CPU rises 24% -> 82% of cap and throttled periods 1% -> 31%; loss only becomes clearly higher than at light load at 160-200 Mbit/s
+# (CPU ~74-82%, throttled 20-31%). Loss itself is too noisy to trigger on. The saturation knee has not been reached yet at 200 Mbit/s.
+UP_THROTTLED, UP_CPU, UP_HOLD = 15.0, 70.0, 5     # % of periods throttled / % of cap, seconds
+THR_MIN_CPU = 50.0     # throttling only counts when the UPF is actually busy
+DOWN_SUM_CPU, DOWN_HOLD = 35.0, 20                # total CPU (% of one cap) of all UPFs; merged onto one UPF it would sit at about half of UP_CPU
 COOLDOWN, AVG = 30, 3                             # seconds between actions, seconds of smoothing
 
 
@@ -57,7 +59,7 @@ def main():
             row[f"{c}_cpu"], row[f"{c}_thr"] = (round(sig[c][0], 1), round(sig[c][1], 1)) if c in sig else ("", "")
             row[f"{c}_sessions"] = sessions(c) if c in up else ""
         if "upf1" in sig:
-            over = over + 1 if (sig["upf1"][1] >= UP_THROTTLED or sig["upf1"][0] >= UP_CPU) else 0
+            over = over + 1 if ((sig["upf1"][1] >= UP_THROTTLED and sig["upf1"][0] >= THR_MIN_CPU) or sig["upf1"][0] >= UP_CPU) else 0
             low = low + 1 if sum(v[0] for v in sig.values()) < DOWN_SUM_CPU else 0
             ready = time.time() - last_action > COOLDOWN
             if len(up) == 1 and over >= UP_HOLD and ready:

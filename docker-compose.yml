@@ -23,8 +23,10 @@ services:
     volumes: ["./config/subs.js:/docker-entrypoint-initdb.d/subs.js:ro"]   # seeds subscribers on first start
     healthcheck:
       test: ["CMD", "mongosh", "--quiet", "open5gs", "--eval", "quit(db.subscribers.countDocuments() > 0 ? 0 : 1)"]
-      interval: 2s
-      retries: 60
+      start_period: 120s      # during startup: check every 2 s so core starts quickly
+      start_interval: 2s
+      interval: 5m            # afterwards: rarely (each mongosh launch costs ~1 s of CPU)
+      retries: 3
     networks: [db]
 
   core:                       # all control-plane NFs (NRF, SCP, AMF, SMF, UDM, UDR, AUSF, PCF, NSSF)

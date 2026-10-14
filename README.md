@@ -53,11 +53,19 @@ Networks: `n2n3` 10.10.1.0/24 (gNB, AMF, UPF), `n4` 10.10.2.0/24 (SMF–UPF), `n
 ## Phase 2 — Load sweep (in progress)
 UPF is capped at 0.25 core (`UPF_QUOTA` in `docker-compose.yml`). Each step `NxR` = N UEs, each sending R Mbit/s UDP:
 ```
-python3 sweep.py results/name.csv 1x5 4x5 8x5      # adds UEs as needed, appends one CSV row per step
+python3 sweep.py -r 3 results/name.csv 1x5 4x5 8x5   # adds UEs as needed; -r 3 runs the step list 3 times
 ```
-Per step it records throughput, loss, RTT, UPF CPU, sessions, and loss inside the UPF.
+- `results/name.csv`: one row per run: throughput, loss, RTT, UPF CPU (avg/peak), **UPF throttling** (`upf1_throttled_pct` = share of 10 ms CPU periods in which the UPF hit its quota), sessions, gNB/UE CPU, plus the setup (`host`, `open5gs` version, `upf_cap_cores`, `monitor`).
+- `results/name_summary.csv`: mean and std per step over the **valid** runs.
+- `results/name_samples.csv`: per-second samples of every run: UPF CPU, throttling, gNB/UE cores, probe RTT and probe loss (`warmup=1` marks the 3 warm-up seconds). Use it for time-series plots and for choosing the controller's hold time. Throttling swings by ±10 points from one second to the next even at a steady load.
+- RTT (`rtt_*`, `probe_lost_pct`) comes from one extra **idle probe UE** that sends no iperf3 traffic, so it shows queueing in the UPF, not the sender's own backlog. RTT from the first loaded UE is kept as `rtt_loaded_*`. A step with N UEs therefore registers N+1 UEs, so at most 59 traffic UEs fit with 60 subscribers.
+- A run is `valid=0` (reason in `invalid_reason`) if any iperf3 failed, the generator sent < 95% of the offered load, or the gNB used ≥ 0.9 core. Those rows measure the simulator, not the UPF.
+- Before each step every UE tunnel must ping the DN, otherwise the sweep stops. After the host sleeps, the UE tunnels are dead until `docker compose restart ue`.
+- On Linux the sweep keeps the host awake (`systemd-inhibit`, lid included) while it runs.
 
-Known limit: above ~12 UEs the UERANSIM `ue` container uses 2-3 of the VM's 4 cores and cannot send the full rate, so those steps measure the simulator, not the UPF. Results so far: `results/calib.csv` (1 UE, valid), `results/baseline.csv` (valid up to ~12 UEs; stopped at 32).
+Monitoring runs from the host (cgroup files under `/sys/fs/cgroup`, counters from `/proc/<pid>/net/dev`), never by `docker exec` into a UPF. Each `docker exec` costs ~30 ms of CPU charged to the UPF's 0.25-core budget. On macOS (Docker Desktop) the host cannot see these files, so the sweep falls back to `docker exec`, and the CSV marks this with `monitor=docker-exec`.
+
+**Older results are skewed by that overhead.** `results/calib.csv`, `results/baseline.csv` and `results/smoke-gomtesh.csv` were measured with `docker exec` monitoring, which throttled the UPF. Example: at 1×80 Mbit/s the smoke run showed 16% loss; with host-side monitoring on the same machine it shows 0% loss. Re-measure before using any of them for the threshold.
 
 ## Phase 4 — Second UPF (written, not yet tested)
 `upf2` exists in `docker-compose.yml` under the `scale` profile with its own N3/N4/N6 addresses (10.10.x.21), and the SMF can list several UPFs:

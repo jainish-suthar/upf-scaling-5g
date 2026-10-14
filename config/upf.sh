@@ -1,5 +1,8 @@
 cd /etc/open5gs
 sed -i "/^  pfcp:/,/^  gtpu:/ s/127.0.0.7/$N4_IP/; /^  gtpu:/,/^  session:/ s/127.0.0.7/$N3_IP/; /^  metrics:/,/port/ s/127.0.0.7/0.0.0.0/" upf.yaml
+check() { grep -q "$2" "$1" || { echo "config edit failed: '$2' not in $1" >&2; exit 1; }; }
+check upf.yaml "address: $N4_IP"
+check upf.yaml "address: $N3_IP"
 ip tuntap add name ogstun mode tun
 ip addr add 10.45.0.1/16 dev ogstun
 ip link set ogstun up

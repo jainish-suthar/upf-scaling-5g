@@ -21,7 +21,7 @@ docker compose exec ue iperf3 -B <UE-IP> -c 10.10.3.30 -t 5   # throughput throu
 ```
 `uesimtun0..N-1` are the UEs' tunnel interfaces; each is one PDU session.
 
-More than 10 UEs: raise the default in `config/subs.js` (`10`), then `docker compose down` first so Mongo re-seeds.
+More than 60 UEs: raise the default in `config/subs.js` (`60`) and the `dn` iperf3 port range (5201-5260) in `docker-compose.yml`, then `docker compose down` first so Mongo re-seeds.
 
 Stop and wipe everything: `docker compose down`
 

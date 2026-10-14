@@ -1,6 +1,8 @@
 # Run: NUM_UES=1 docker compose up -d     (subscribers are seeded from config/subs.js)
 # Two UPFs: UPF_N4_IPS="10.10.2.20 10.10.2.21" docker compose --profile scale up -d   (SMF lists both; upf2 only starts with the profile)
 # Baseline: 1 UPF. N2/N3 = 10.10.1.0/24, N4 = 10.10.2.0/24, N6 = 10.10.3.0/24
+name: upf-scaling-5g             # fixed project name: sweep.py expects containers named upf-scaling-5g-*
+
 x-tun: &tun
   cap_add: [NET_ADMIN]
   devices: [/dev/net/tun]

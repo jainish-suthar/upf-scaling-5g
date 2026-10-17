@@ -8,11 +8,13 @@ import csv, os, re, subprocess, sys, time
 from collections import deque
 from sweep import P, cap, cpu_stat, run, running, sessions
 
-# PROVISIONAL, from results/threshold.csv (CPU/throttling read via the Docker API, 4 runs per load, 20-200 Mbit/s offered):
-# CPU rises 24% -> 82% of cap and throttled periods 1% -> 31%; loss only becomes clearly higher than at light load at 160-200 Mbit/s
-# (CPU ~74-82%, throttled 20-31%). Loss itself is too noisy to trigger on. The saturation knee has not been reached yet at 200 Mbit/s.
-UP_THROTTLED, UP_CPU, UP_HOLD = 15.0, 70.0, 5     # % of periods throttled / % of cap, seconds
-THR_MIN_CPU = 50.0     # throttling only counts when the UPF is actually busy
+# From results/threshold_q1000.csv (UPF_QUOTA=1000 = 0.1 core, 4 UEs, 4 shuffled runs per load, medians): loss first rises above
+# light-load level at 60 Mbit/s offered (2.8%, all 4 runs > 1.3%) and delivered throughput flattens at ~69 Mbit/s at 80 offered;
+# there the UPF sits at ~92% of its cap and 70-82% of 10 ms periods are throttled. Scale-up takes ~8 s (UP_HOLD + ~3 s PFCP
+# association) and only helps sessions set up afterwards, so it triggers at ~2/3 of the knee: ~40 Mbit/s, CPU ~80%, ~50% throttled.
+# Percentages are of the UPF's own cap: re-derive them for a different UPF_QUOTA.
+UP_THROTTLED, UP_CPU, UP_HOLD = 50.0, 80.0, 5     # % of periods throttled / % of cap, seconds
+THR_MIN_CPU = 75.0     # throttling only counts when the UPF is actually busy
 DOWN_SUM_CPU, DOWN_HOLD = 35.0, 20                # total CPU (% of one cap) of all UPFs; merged onto one UPF it would sit at about half of UP_CPU
 COOLDOWN, AVG = 30, 3                             # seconds between actions, seconds of smoothing
 

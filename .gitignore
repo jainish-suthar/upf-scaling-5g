@@ -6,3 +6,5 @@ __pycache__/
 *.log
 *.pcap
 *.pcapng
+results/compare_v1_endreport/
+results/smoke/ramp_ctl_*

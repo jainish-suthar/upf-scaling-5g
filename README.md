@@ -76,11 +76,11 @@ docker compose --profile scale up -d --no-deps upf2                     # bring 
 ```
 Observed: new PDU sessions alternate between associated UPFs; existing sessions stay where they are.
 
-## Phase 5 — Controller (written; scale-down tested, scale-up under load not yet)
+## Phase 5 — Controller (scale-down tested; scale-up under load seen in 3 ramp runs)
 ```
 python3 controller.py results/controller.csv
 ```
-Scale up: upf1 over the threshold for 5 s -> starts upf2, waits for the SMF's PFCP association (2-3 s from container start to association). **Load-triggered scale-up has not been demonstrated yet**: the earlier logged scale-ups (`results/old_exec_probe/`) fired on a measurement artifact. At idle the fixed controller stays quiet (50 s test).
+Scale up: upf1 over the threshold for 5 s -> starts upf2, waits for the SMF's PFCP association (2-3 s from container start to association). Load-triggered scale-up now works at a 0.1-core cap (`UPF_QUOTA=1000`): in 3 `ramp.py --controller` runs it fired at 17-29 s, once ~30 Mbit/s was offered (upf1 at 60-90% CPU, 25-60% throttled). The thresholds are still the provisional ones; the earlier logged scale-ups (`results/old_exec_probe/`) fired on a measurement artifact. At idle the fixed controller stays quiet (50 s test).
 Scale down: total UPF CPU < 25% for 20 s **and upf2 has 0 sessions** -> stops upf2 (measured: 2 s after the last session left, `results/scale_down.csv`).
 
 Things to know:
@@ -88,6 +88,64 @@ Things to know:
 - Stopping a UPF that still has sessions drops them; the SMF takes ~15 s to stop waiting on it.
 - Scale-up only helps new sessions. With the existing sessions on upf1, upf2 stays idle until UEs (re)register.
 - UERANSIM's radio link sometimes fails ("Radio link failure"), probably Docker VM / laptop stalls. Final timed runs belong on the Linux VM.
+
+## Phase 3 (redo) — Reach the knee with a lower UPF cap (done)
+At 0.25 core the UPF is not saturated by the most UERANSIM can send (~200 Mbit/s). From the CPU column above, 100 Mbit/s needs ~0.145 core, so a 0.1-core cap should saturate around 60-70 Mbit/s:
+```
+docker compose down && UPF_QUOTA=1000 NUM_UES=1 docker compose up -d
+python3 sweep.py results/threshold_q1000.csv --reps 4 --shuffle 1 4x5 4x10 4x15 4x20 4x25 4x30 4x40 4x50
+python3 plot.py sweep results/threshold.csv results/threshold_q1000.csv     # -> results/threshold_sweep.png
+```
+Use a new CSV per cap (the cap is not a column).
+
+Result (`results/threshold_q1000.csv`, 0.1 core, 4 UEs, 4 shuffled runs per load, medians; plot `results/threshold_sweep.png`):
+
+| offered Mbit/s | 10 | 20 | 30 | 40 | 50 | 60 | 80 |
+|---|---|---|---|---|---|---|---|
+| delivered | 9.9 | 19.9 | 29.9 | 39.8 | 49.6 | 58.2 | 69.0 |
+| loss % | 0.5 | 0.8 | 0.4 | 0.5 | 0.7 | 2.8 | 13.7 |
+| UPF CPU % of cap | 42 | 60 | 75 | 81 | 88 | 92 | 92 |
+| throttled % | 11 | 16 | 32 | 53 | 62 | 70 | 82 |
+
+Knee at ~60 Mbit/s (loss up in all 4 runs; throughput flattens at ~69). Controller now scales up at CPU >= 80% (or >= 50% throttled with CPU >= 75%), about 2/3 of the knee, since scale-up takes ~8 s and only helps new sessions. Then set `UP_CPU` / `UP_THROTTLED` in `controller.py` a bit below where loss/RTT rise, and use the same `UPF_QUOTA` for phases 5-7.
+
+## Phase 6 — Session distribution check (first run done)
+```
+UPF_QUOTA=1000 UPF_N4_IPS="10.10.2.20 10.10.2.21" NUM_UES=1 docker compose --profile scale up -d    # both UPFs up before the UEs
+python3 session_trace.py results/trace --ues 6
+```
+Captures PFCP on N4 (inside `core`) and GTP-U on N3 (inside `gnb`, so the UPFs pay nothing), registers 6 new UEs and pings once through each.
+Writes `results/trace/{n4,n3}.pcap` (open in Wireshark) and `sessions.csv`: per new session, the UPF the SMF sent the PFCP Session Establishment to, the N3 TEID, and the UPF that UE's GTP-U packets actually reached.
+It prints how many times the UPF changed between consecutive sessions (strict round-robin = every time) and whether PFCP and GTP-U agree. `--parse dir` re-reads saved pcaps.
+
+Result (`results/trace/`, 0.1-core cap, both UPFs up, 6 new UEs, one run): the SMF sent sessions to upf2, upf1, upf2, upf1, upf2, upf1 (switched UPF 5/5 times = strict round-robin), and for all 6 the uplink GTP-U went to the UPF and TEID that PFCP set up.
+
+## Phase 7 — Single vs multi-UPF comparison (one smoke pair run, needs repetitions)
+`ramp.py` adds one UE every `--gap` s; each sends `--rate` Mbit/s UDP until `--hold` s after the last one, so load climbs while sessions are being placed. Same ramp twice:
+```
+# A: one UPF only
+docker compose down && UPF_QUOTA=1000 NUM_UES=1 docker compose up -d
+python3 ramp.py results/ramp_single --ues 8 --rate 15 --gap 20 --hold 60
+# B: both UPFs listed, only upf1 running, controller decides
+docker compose down && UPF_QUOTA=1000 UPF_N4_IPS="10.10.2.20 10.10.2.21" NUM_UES=1 docker compose up -d
+python3 ramp.py results/ramp_scaled --ues 8 --rate 15 --gap 20 --hold 60 --controller
+python3 plot.py ramp results/ramp_single results/ramp_scaled                 # -> results/ramp_single_ramp.png
+```
+Pick `--rate` x `--ues` so the total is well past the one-UPF knee from phase 3 (e.g. 8 x 15 = 120 Mbit/s at 0.1 core).
+Outputs: `_timeline.csv` (per second: offered/delivered, loss, RTT, per-UPF CPU/throttling/sessions, controller actions), `_ues.csv` (per UE: the UPF it landed on, delivered, loss, RTT), `_controller.csv`.
+Smoke result (`results/smoke/`, 0.1-core cap, 8 UEs x 15 Mbit/s, one run each, a kind cluster also running on the host, host load ~8):
+
+| last 70 s (120 Mbit/s offered) | delivered Mbit/s | loss % | RTT ms |
+|---|---|---|---|
+| 1 UPF | 89 | 24 | 6.5 |
+| controller (scaled up at 29 s, upf2 associated in 2.6 s) | 113 | 1.3 | 2.3 |
+
+The UEs on upf2 (3, 5, 7) saw ~0.1% loss and ~1 ms RTT; the UEs left on upf1 still saw 1-2% loss with upf1 at ~97% of its cap, because existing sessions never move.
+
+Full comparison: `sh compare.sh 3` runs single / scaled / static (both UPFs from the start) 3 times each, interleaved, and prints the table (`summarize.py`).
+A first full run was **not usable**: 13 of 72 UE streams lost their whole result because iperf3 reports only at the end and some UEs died mid-run (radio link failures, high host load). `ramp.py` now reads per-second logs from the dn's iperf3 servers, keeps every second a UE delivered, and flags UEs that stopped early (`stopped_early`, `last_rx_s`); host load is logged per second. Smoke-tested, the full comparison still has to be re-run.
+
+Repeat each run 3+ times (fresh `docker compose down` each). Expect only UEs that arrive after scale-up, and only every other one of them, to land on upf2; compare loss and RTT of those UEs and of the total after scale-up.
 
 ## Validity (audit)
 Functional behaviour (late UPF joins, round-robin placement, scale-down only at 0 sessions) holds; performance claims are still limited:
@@ -97,9 +155,9 @@ Functional behaviour (late UPF joins, round-robin placement, scale-down only at 
 ## Phases
 - [x] 1. Baseline, 1 UPF, multiple UEs
 - [x] 2. Load sweep and metrics (instrumentation fixed, see Validity)
-- [~] 3. Threshold (provisional: knee not reached at 200 Mbit/s, needs a lower UPF cap)
+- [x] 3. Threshold (knee ~60 Mbit/s at 0.1 core; controller thresholds set from it)
 - [x] 4. Second UPF (starts late, SMF associates in ~3 s, new sessions alternate)
-- [~] 5. Controller (scale-down at 0 sessions works; scale-up under real load still to be shown)
-- [ ] 6. Session distribution check (N4/GTP-U traces)
-- [ ] 7. Single vs multi-UPF comparison
+- [x] 5. Controller (scale-up under load at 0.1 core, thresholds from phase 3; scale-down at 0 sessions)
+- [x] 6. Session distribution check (strict round-robin, PFCP and GTP-U agree on 6/6; one run)
+- [~] 7. Single vs multi-UPF comparison (measurement fixed; re-run `sh compare.sh 3` on a quiet host)
 - [ ] 8. Write-up

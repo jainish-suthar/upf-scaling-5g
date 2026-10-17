@@ -24,8 +24,10 @@ Each UPF container has a fixed CPU limit (e.g. 0.5 core) so it saturates before 
 ```
 docker-compose.yml     core + gNB + data network; UPF2 under a profile
 config/                Open5GS + UERANSIM yaml (only what we change)
-run_load.py            ramps UEs/traffic, samples metrics, writes CSV
-controller.py          the scaling controller
+sweep.py               fixed-load steps (phases 2-3), samples metrics, writes CSV
+controller.py          the scaling controller (phase 5)
+session_trace.py       PFCP + GTP-U capture: which UPF each session landed on (phase 6)
+ramp.py                UEs arrive one by one under load, optional controller (phase 7)
 plot.py                CSVs -> graphs
 ```
 

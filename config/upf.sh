@@ -10,5 +10,7 @@ ip link set ogstun up
 N6_DEV=$(ip -o -4 addr | awk -v ip="$N6_IP/" 'index($4, ip) {print $2}')
 iptables -t nat -A POSTROUTING -s 10.45.0.0/16 -o $N6_DEV -j MASQUERADE
 mkdir -p /var/log/open5gs
-open5gs-upfd -c /etc/open5gs/upf.yaml &
-sleep 2; tail -F /var/log/open5gs/upf.log
+tail -F /var/log/open5gs/upf.log 2>/dev/null &
+# the UPF replaces this shell as the container's main process: if it crashes the container stops, instead of
+# `tail -F` keeping a dead UPF's container "Up" (the controller trusts running containers to be working UPFs)
+exec open5gs-upfd -c /etc/open5gs/upf.yaml

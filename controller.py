@@ -8,11 +8,12 @@ import csv, os, re, subprocess, sys, time
 from collections import deque
 from sweep import P, cap, cpu_stat, run, running, sessions
 
-# From results/threshold_q1000.csv (UPF_QUOTA=1000 = 0.1 core, 4 UEs, 4 shuffled runs per load, medians): loss first rises above
-# light-load level at 60 Mbit/s offered (2.8%, all 4 runs > 1.3%) and delivered throughput flattens at ~69 Mbit/s at 80 offered;
-# there the UPF sits at ~92% of its cap and 70-82% of 10 ms periods are throttled. Scale-up takes ~8 s (UP_HOLD + ~3 s PFCP
-# association) and only helps sessions set up afterwards, so it triggers at ~2/3 of the knee: ~40 Mbit/s, CPU ~80%, ~50% throttled.
-# Percentages are of the UPF's own cap: re-derive them for a different UPF_QUOTA.
+# From results/linux/linux_threshold_q1000.csv (UPF_QUOTA=1000 = 0.1 core, 4 UEs, 4 shuffled runs per load, medians, all valid):
+# delivered throughput flattens at ~46 Mbit/s; at 40 Mbit/s loss (1.4%), the RTT tail and throttling (62% of periods) start to rise,
+# and at 50 Mbit/s the UPF is throttled in 99% of periods with 8.4% loss. Scale-up takes UP_HOLD + 0-11 s (the SMF retries the PFCP
+# association about every 11 s) and only helps sessions set up afterwards, so it triggers at ~2/3 of the knee: ~30 Mbit/s, where
+# CPU is ~83% of cap (20 Mbit/s sits at ~56%, so it stays quiet there).
+# Percentages are of the UPF's own cap: re-derive them for a different UPF_QUOTA or host.
 UP_THROTTLED, UP_CPU, UP_HOLD = 50.0, 80.0, 5     # % of periods throttled / % of cap, seconds
 THR_MIN_CPU = 75.0     # throttling only counts when the UPF is actually busy
 DOWN_SUM_CPU, DOWN_HOLD = 35.0, 20                # total CPU (% of one cap) of all UPFs; merged onto one UPF it would sit at about half of UP_CPU

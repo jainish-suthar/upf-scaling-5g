@@ -101,8 +101,14 @@ HEALED = [0]
 
 
 def power():
-    try:
+    try:                         # macOS
         return run("pmset", "-g", "batt").split("\n")[0].replace("Now drawing from ", "").strip("' ")
+    except Exception:
+        pass
+    try:                         # Linux: any mains adapter online?
+        ac = [open(f"/sys/class/power_supply/{d}/online").read().strip() for d in os.listdir("/sys/class/power_supply")
+              if os.path.exists(f"/sys/class/power_supply/{d}/online")]
+        return "AC Power" if "1" in ac else "Battery Power" if ac else ""
     except Exception:
         return ""
 

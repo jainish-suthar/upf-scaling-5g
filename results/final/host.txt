@@ -1,0 +1,19 @@
+Tuesday 10 November 2026 10:48:07 PM IST
+6.8.0-147-generic
+12
+               total        used        free      shared  buff/cache   available
+Mem:           7.1Gi       2.7Gi       1.9Gi        41Mi       2.8Gi       4.4Gi
+governor: performance
+platform profile: 
+AC online: 1 
+load: 0.32 0.31 0.32 1/927 988319
+docker 29.8.0
+top CPU users:
+%CPU COMMAND
+ 1.9 gnome-terminal-
+ 1.6 gnome-shell
+ 0.4 warp-svc
+ 0.2 irq/79-rtw89_pci
+ 0.2 dockerd
+ 0.2 tracker-extract
+ 0.2 kworker/u24:1-gfx_high

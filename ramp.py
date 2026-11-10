@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
 """Ramp experiment for the single vs multi-UPF comparison (phase 7).
-usage: python3 ramp.py results/name [--ues 8] [--rate 15] [--gap 20] [--hold 60] [--controller]
+usage: python3 ramp.py results/name [--ues 8] [--rate 15] [--gap 20] [--hold 60] [--controller [--drain-timeout S] [--empty-down]]
+                                   [--down-gap 20 [--order fifo|lifo|upf2-last] [--linger 0] [--tail 60]]
 A new UE registers every GAP s and immediately sends RATE Mbit/s of UDP until the end (HOLD s after the last UE),
 so offered load climbs in steps and each new PDU session is placed while the UPFs are already loaded.
+--down-gap adds a ramp-down (phase 8): after the hold, one UE stops its traffic and deregisters (switch-off) every DOWN_GAP s,
+oldest first (fifo), newest first (lifo) or the UEs on upf2 last (upf2-last: a long-lived session pins upf2), then TAIL s
+with no UEs, so the controller's scale-down can be watched. --linger keeps the last UE LINGER s longer (a long-lived session). A UE whose session is cut and re-established gets a new IP:
+the timeline's new_ue_ips column shows when it appeared.
+--drain-timeout and --empty-down are passed to controller.py (stop upf2 even with sessions left, S s after the load went low).
 Writes name_timeline.csv (per second: offered/delivered, loss, RTT, each UPF's CPU/throttling/sessions, controller
 actions) and name_ues.csv (per UE: which UPF its session landed on, delivered throughput, loss, RTT, last second received).
 Throughput/loss come from the data network's iperf3 servers, which log every second as it happens, so a UE whose
@@ -22,12 +28,22 @@ def servers():                   # fresh iperf3 servers on dn, one per UE port, 
                               "iperf3 -s -D -p $p -i 1 --forceflush --timestamps='%s ' --logfile /tmp/s$p.log; done"))
 
 
-def sampler(t0, stop, rows):     # once a second: each running UPF's CPU (% of cap), throttled periods (%), sessions
+def imsi_of(ip):                 # which UERANSIM UE owns this PDU address (asks nr-ue, never a UPF)
+    for imsi in run(*dx("ue", "./nr-cli", "--dump")).split():
+        if re.search(rf"address: {re.escape(ip)}\s", run(*dx("ue", "./nr-cli", imsi, "-e", "ps-list"))):
+            return imsi
+    return ""
+
+
+def sampler(t0, stop, rows, known):     # once a second: each running UPF's CPU (% of cap), throttled periods (%), sessions
     prev, caps = {}, {}
     while not stop.is_set():
         time.sleep(1)
         up = running()
         row = {"sec": int(time.time() - t0), "upfs": len(up), "host_load1": round(os.getloadavg()[0], 2)}
+        ips = [ip for _, ip in tuns()]                      # UE tunnels (asks the ue container, not a UPF)
+        row["ue_tunnels"], row["new_ue_ips"] = len(ips), " ".join(ip for ip in ips if ip not in known)
+        known.update(ips)
         for c in ("upf1", "upf2"):
             row[f"{c}_cpu"] = row[f"{c}_thr"] = row[f"{c}_sessions"] = ""
             if c not in up:
@@ -41,7 +57,7 @@ def sampler(t0, stop, rows):     # once a second: each running UPF's CPU (% of c
             if c in prev:
                 dt, du, per, thr = now - prev[c][0], u[0] - prev[c][1][0], u[1] - prev[c][1][1], u[2] - prev[c][1][2]
                 k = caps.setdefault(c, cap(c) or 1)
-                row[f"{c}_cpu"] = round(100 * du / 1e6 / dt / k, 1)
+                row[f"{c}_cpu"] = round(100 * du / 1e6 / dt / k, 1) if du >= 0 else ""     # counters reset while a container stops
                 row[f"{c}_thr"] = round(100 * thr / per, 1) if per else ""
             prev[c] = (now, u)
             row[f"{c}_sessions"] = sessions(c)
@@ -61,6 +77,13 @@ def main():
     if ctl:
         a.remove("--controller")
     n, rate, gap, hold = opt("--ues", 8), opt("--rate", 15.0, float), opt("--gap", 20), opt("--hold", 60)
+    down_gap, order, tail, drain = opt("--down-gap", 0), opt("--order", "fifo", str), opt("--tail", 60), opt("--drain-timeout", None)
+    linger = opt("--linger", 0)
+    early = "--empty-down" in a
+    if early:
+        a.remove("--empty-down")
+    if order not in ("fifo", "lifo", "upf2-last"):
+        raise SystemExit("--order is fifo, lifo or upf2-last")
     out = a[0]
     os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
     if ctl and len(running()) > 1:
@@ -69,13 +92,15 @@ def main():
     servers()
     time.sleep(2)
     t0 = time.time()
-    end = t0 + n * gap + hold
+    down0 = t0 + n * gap + hold                 # ramp-down starts here (or the run ends here without --down-gap)
+    end = down0 + (n * down_gap + linger + tail if down_gap else 0)
     stop, samples = threading.Event(), []
-    th = threading.Thread(target=sampler, args=(t0, stop, samples), daemon=True)
-    th.start()
-    ctrl = subprocess.Popen([sys.executable, "controller.py", f"{out}_controller.csv"], stdout=subprocess.DEVNULL) if ctl else None
-
     have = {ip for _, ip in tuns()}
+    th = threading.Thread(target=sampler, args=(t0, stop, samples, set(have)), daemon=True)
+    th.start()
+    ctrl = subprocess.Popen([sys.executable, "controller.py", f"{out}_controller.csv"] + (["--drain-timeout", str(drain)] if drain is not None else []) + (["--empty-down"] if early else []),
+                            stdout=subprocess.DEVNULL) if ctl else None
+
     ues = []
     for i in range(n):
         time.sleep(max(0, t0 + i * gap - time.time()))
@@ -85,8 +110,9 @@ def main():
         have.add(ip)
         time.sleep(1)
         landed = [c for c in running() if (sessions(c) or 0) > before.get(c, 0)]
-        left = int(end - time.time())
-        ue = {"n": i + 1, "ue_ip": ip, "upf": "+".join(landed), "start_s": round(time.time() - t0, 1), "upfs_running": len(running())}
+        left = int(end - time.time())     # traffic runs to the end; a ramp-down stops it earlier (kill, then deregister)
+        ue = {"n": i + 1, "ue_ip": ip, "tun": tun, "upf": "+".join(landed), "start_s": round(time.time() - t0, 1), "upfs_running": len(running()),
+              "leave_at": end, "imsi": imsi_of(ip) if down_gap else ""}
         ue["ping_out"] = tempfile.TemporaryFile("w+")      # files, not pipes: a full pipe would stall ping/iperf3
         ue["ping"] = subprocess.Popen(dx("ue", "ping", "-D", "-I", tun, "-i", str(1 / PING_HZ), "-w", str(left), DN),
                                       stdout=ue["ping_out"])
@@ -101,6 +127,22 @@ def main():
                 break
         ues.append(ue)
         print(f"{ue['start_s']:>6}s  UE {i + 1} {ip} -> {ue['upf'] or '?'}  ({len(running())} UPF running)", flush=True)
+
+    seq = {"fifo": ues, "lifo": ues[::-1], "upf2-last": [u for u in ues if u["upf"] != "upf2"] + [u for u in ues if u["upf"] == "upf2"]}[order]
+    for k, ue in enumerate(seq if down_gap else []):     # ramp-down: one UE every DOWN_GAP s stops its traffic, then deregisters cleanly
+        ue["leave_at"] = down0 + k * down_gap + (linger if k == n - 1 else 0)
+        time.sleep(max(0, ue["leave_at"] - time.time()))
+        run(*dx("ue", "pkill", "-f", "--", f"-B {ue['ue_ip']} "))
+        run(*dx("ue", "pkill", "-f", "--", f"ping -D -I {ue['tun']} "))
+        ue["iperf"].wait()
+        before = {c: sessions(c) for c in running()}
+        run(*dx("ue", "./nr-cli", ue["imsi"], "-e", "deregister switch-off")) if ue["imsi"] else None
+        ue["left_s"] = round(time.time() - t0, 1)
+        time.sleep(1)
+        ue["left_from"] = "+".join(c for c in running() if (sessions(c) or 0) < (before.get(c) or 0))
+        print(f"{ue['left_s']:>6}s  UE {ue['n']} {ue['ue_ip']} left {ue['left_from'] or '?'}  "
+              f"(sessions now {', '.join(f'{c}={sessions(c)}' for c in running())})", flush=True)
+    time.sleep(max(0, end - time.time()))
 
     delivered, lost, pkts, rtt = {}, {}, {}, {}
     for i, ue in enumerate(ues):
@@ -119,7 +161,7 @@ def main():
         ue["delivered_mbps"] = round(got / secs, 2) if secs else 0
         ue["loss_pct"] = round(100 * n_lost / sent, 2) if sent else ""
         ue["seconds_received"], ue["last_rx_s"] = secs, last if last is not None else ""
-        ue["stopped_early"] = int(last is None or last < end - t0 - 5)
+        ue["stopped_early"] = int(last is None or last < ue["leave_at"] - t0 - 5)
         times = []
         ue["ping"].wait()
         ue["ping_out"].seek(0)
@@ -140,21 +182,26 @@ def main():
                 if r["action"] and float(r["t"]) >= t0:
                     actions[int(float(r["t"]) - t0)] = r["action"]
 
+    secs = sorted(x["sec"] for x in samples)       # samples come every ~1.2 s: put each action on the first sampled second at or after it
+    placed = {}
+    for k, v in actions.items():
+        at = next((x for x in secs if x >= k), secs[-1] if secs else k)
+        placed[at] = f"{placed[at]}; {v}" if at in placed else v
     with open(f"{out}_timeline.csv", "w", newline="") as f:
         w = None
         for s in samples:
             k = s["sec"]
-            active = sum(u["start_s"] <= k for u in ues)
+            active = sum(u["start_s"] <= k < u.get("left_s", 1e9) for u in ues)
             r = {**s, "active_ues": active, "offered_mbps": active * rate, "delivered_mbps": round(delivered.get(k, 0), 1),
                  "loss_pct": round(100 * lost[k] / pkts[k], 2) if pkts.get(k) else "",
                  "rtt_avg_ms": round(statistics.mean(rtt[k]), 2) if k in rtt else "",
-                 "action": actions.get(k, ""), "controller": int(ctl)}
+                 "action": placed.get(k, ""), "controller": int(ctl)}
             if w is None:
                 w = csv.DictWriter(f, fieldnames=list(r))
                 w.writeheader()
             w.writerow(r)
     with open(f"{out}_ues.csv", "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=["n", "ue_ip", "upf", "start_s", "upfs_running", "iperf_attempts", "delivered_mbps", "loss_pct", "seconds_received", "last_rx_s", "stopped_early", "rtt_avg_ms", "rtt_p95_ms", "ping_replies"],
+        w = csv.DictWriter(f, fieldnames=["n", "ue_ip", "imsi", "upf", "start_s", "left_s", "left_from", "upfs_running", "iperf_attempts", "delivered_mbps", "loss_pct", "seconds_received", "last_rx_s", "stopped_early", "rtt_avg_ms", "rtt_p95_ms", "ping_replies"],
                            extrasaction="ignore")
         w.writeheader()
         w.writerows(ues)

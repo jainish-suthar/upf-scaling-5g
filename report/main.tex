@@ -6,6 +6,7 @@
 \usepackage{url}
 \usepackage[hidelinks]{hyperref}
 \usepackage{cite}
+\usepackage{float}
 
 \begin{document}
 
@@ -21,72 +22,98 @@ suthar.jainish@iitgn.ac.in, gomtesh@iitgn.ac.in}
 \maketitle
 
 \begin{abstract}
-We study when a single User Plane Function (UPF) in a 5G core starts to degrade and whether a second UPF, started on demand, helps. We build a testbed from Open5GS, UERANSIM and iperf3 in Docker Compose, cap each UPF at 0.1 CPU core so it saturates before the traffic generator does, and measure throughput, loss, round-trip time and UPF CPU as load rises. One UPF carries about 68~Mbit/s and degrades from about 60~Mbit/s. A small controller that watches UPF CPU starts a second UPF at 80\% of the cap. With 96~Mbit/s offered, this cuts loss from 27.9\% to 3.9\%, while starting with two UPFs gives 0.0\%. Traces of the N4 and N3 interfaces show that Open5GS places new sessions strictly in round-robin order and never moves existing ones, which explains the remaining gap. We also show how to retire the second UPF without losing traffic, and list the configuration needed and the limits we found.
+A single User Plane Function (UPF) in a 5G core carries all user traffic, so its CPU is a bottleneck. Open5GS, the open-source core we use, lets the Session Management Function (SMF) work with several UPFs, but nothing in it decides when to add one. We measure when one UPF degrades and build a small controller that starts a second UPF when the first nears saturation. On a Docker test bed with each UPF capped at 0.1 CPU core, one UPF saturates at about 68~Mbit/s and degrades from about 60~Mbit/s. A controller acting at 80\% of the UPF's CPU cap reduces packet loss at 96~Mbit/s offered load from 27.9\% (default, one UPF) to 3.9\%, without restarting the core; two UPFs running from the start reach 0.0\%. Packet traces explain the remaining gap: Open5GS assigns new sessions to UPFs in strict round-robin order and never moves a session. We also show how to remove the second UPF without losing traffic, and which limits of Open5GS remain.
 \end{abstract}
 
 \begin{IEEEkeywords}
-5G core, UPF, Open5GS, UERANSIM, scaling, PFCP, GTP-U
+5G core, UPF, Open5GS, UERANSIM, autoscaling, PFCP, GTP-U
 \end{IEEEkeywords}
 
 \section{Introduction}
-The UPF carries all user traffic in a 5G network. When one UPF runs out of CPU, packets are delayed and dropped, so operators add UPF instances. The 3GPP architecture lets the Session Management Function (SMF) control several UPFs over the N4 (PFCP) interface~\cite{ts23501,ts29244}, but it does not say when to add one or how new sessions are spread over them.
+The UPF forwards all user traffic in a 5G network: uplink packets arrive from the base station over N3 inside GTP-U tunnels and leave towards the data network over N6, while the SMF controls the UPF over N4 using PFCP~\cite{ts23501,ts29244}. When a UPF runs out of CPU, packets are delayed and dropped. The standard allows an SMF to control several UPFs, but it does not say when a second UPF should be added, how new sessions should be spread over the UPFs, or how a UPF can be removed again.
 
-This project answers four practical questions on an open-source core. (1) At what load does one UPF degrade? (2) Can a second UPF join while the core is running, without restarting it? (3) Can a simple controller decide when to add and remove it? (4) How much does the second UPF help, and what stops it from helping more? All numbers come from one test bed and one measurement session, described in Section~\ref{sec:setup}.
+In Open5GS as shipped, UPFs are listed statically in the SMF and nothing starts or stops one in response to load. We call this the \emph{default}. This project asks three questions about it.
+\begin{itemize}
+\item \textbf{RQ1.} At what load does one UPF degrade, and which signal shows it early enough to act on?
+\item \textbf{RQ2.} Can a second UPF join a running core, and how does the SMF distribute new sessions over the UPFs?
+\item \textbf{RQ3.} How much does on-demand scaling improve on the default, how does it compare with running two UPFs from the start, and how can the second UPF be removed safely?
+\end{itemize}
 
-\section{Test Bed}\label{sec:setup}
-Fig.~\ref{fig:arch} shows the setup. The core is Open5GS 2.8.0 (AMF, SMF, NRF, UDM, UDR, AUSF, PCF, NSSF in one container, subscribers in MongoDB)~\cite{open5gs}. The gNB and the simulated UEs run in UERANSIM 3.2.6~\cite{ueransim}. The data network is one container running 60 iperf3 servers, one per UE. Each UPF is its own container with separate N3 (gNB side), N4 (SMF side) and N6 (data network side) addresses. Everything is started with Docker Compose.
+\textbf{Contributions.} (i)~A measured saturation point and a CPU-based scaling trigger for one UPF. (ii)~A lightweight controller that adds and removes a second UPF without restarting the core. (iii)~A packet-level verification of how Open5GS distributes sessions, and a comparison of the default, the controller and an always-on pair. (iv)~The configuration needed for two UPFs and the practical limits we found.
 
-\begin{figure}[t]
+\section{Experimental Setup}\label{sec:setup}
+\subsection{Test bed}
+Fig.~\ref{fig:testbed} shows the test bed, run with Docker Compose. The core is Open5GS 2.8.0~\cite{open5gs}; the gNB and simulated UEs are UERANSIM 3.2.6~\cite{ueransim}; the data network (DN) runs one iperf3 server per UE. Each UPF is a separate container with its own N3, N4 and N6 address.
+
+\begin{figure*}[t]
 \centering
-\includegraphics[width=\columnwidth]{architecture.png}
-\caption{Test bed and controller loop. The controller reads UPF CPU through the Docker API and starts or stops the second UPF.}
-\label{fig:arch}
-\end{figure}
+\includegraphics[width=0.84\textwidth]{testbed.png}
+\caption{Test bed. upf1 is always running; upf2 is started on demand. Each UPF is capped at 0.1 CPU core.}
+\label{fig:testbed}
+\end{figure*}
 
-\textbf{CPU cap.} UERANSIM cannot generate enough traffic to saturate an uncapped UPF. We therefore limit each UPF to 0.1 core (1~ms of CPU per 10~ms period). The cap is artificial, so absolute Mbit/s figures are not real UPF capacities; the shape of the results is what matters.
+\subsection{CPU cap}
+UERANSIM cannot generate enough traffic to saturate an uncapped UPF, so we limit each UPF to 0.1 core (1~ms of CPU per 10~ms period). The cap is artificial: absolute Mbit/s values are not real UPF capacities, and the shape of the results is what matters.
 
-\textbf{Measurements.} Each run sends uplink UDP from several UEs through the UPF to the data network. We record delivered throughput, loss (from iperf3), RTT (ping through one tunnel), UPF CPU as a share of its cap, the share of 10~ms periods in which the UPF was throttled, and the number of sessions. CPU and throttling are read through the Docker Engine API, never with \texttt{docker exec} inside the UPF, because an early version of the tool did exactly that and added about 4\% CPU and 50\% throttling at idle. Failed steps are retried and flagged, and the order of loads is shuffled.
+\subsection{Set-ups compared}
+The same workload is run in three set-ups: the \textbf{default} (one UPF, no scaling), \textbf{ours} (one UPF, and a controller that adds the second), and an \textbf{upper bound} (both UPFs running before any UE arrives). The workload is a ramp: a new UE joins every 20~s and sends 12~Mbit/s of UDP uplink, up to 8 UEs (96~Mbit/s). This is about 1.4 times the capacity of one UPF but within the capacity of two. Each set-up is run three times from a fresh stack, interleaved.
 
-\textbf{Host.} The final results were measured in one session on a 12-core Linux laptop on AC power, CPU governor \texttt{performance}, nothing else running (host load 0.3 at the start; the 1-minute load average peaked at 3.2 during the sweep and stayed below 2.3 in the ramp runs). Earlier runs on a laptop with Docker Desktop were used for development only and are not used for the figures below.
+\subsection{Metrics and measurement}
+We record delivered throughput and packet loss (both from the iperf3 receivers), RTT (ping through one tunnel), UPF CPU as a share of its cap, the share of 10~ms periods in which the UPF was throttled, and the session count per UPF. CPU and throttling are read through the Docker Engine API and never by running a command inside the UPF: an early version did, and the probe itself added about 4\% CPU and 50\% throttling at idle. Failed steps are retried and flagged, and the order of loads is shuffled.
 
-\section{Where One UPF Degrades}\label{sec:threshold}
-We offered 10--120~Mbit/s from 4 UEs, four shuffled repetitions per load. All 40 runs were valid (no failed iperf3, no dead tunnels). Table~\ref{tab:thr} gives the medians.
+\subsection{Host}
+The final results come from one session on a 12-core Linux laptop on AC power with the CPU governor set to \texttt{performance} and nothing else running. The load average was 0.3 at the start; it peaked at 3.2 during the sweep and stayed below 2.3 during the ramps.
+
+\section{Controller Design}\label{sec:ctrl}
+Fig.~\ref{fig:ctrl} shows the controller, a short Python script that runs once per second. It moves between two states using only UPF CPU and session counts read through the Docker API.
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=0.8\textwidth]{controller.png}
+\caption{Controller. It starts upf2 when upf1 stays at 80\% of its CPU cap for 5~s, and stops it when total CPU is low and upf2 has no sessions.}
+\label{fig:ctrl}
+\end{figure*}
+
+\textbf{Scale up.} If upf1 stays at or above 80\% of its CPU cap for 5~s, the controller starts upf2 and waits for the SMF's PFCP association. The threshold is derived from the sweep in Section~\ref{sec:threshold}. \textbf{Scale down.} If total UPF CPU stays below 35\% of one cap for 20~s \emph{and} upf2 has no sessions, upf2 is stopped. The SMF cannot be told to stop choosing a UPF, so stopping one that still has sessions would cut them. A 30~s cooldown follows every action to prevent flapping. Two options are used in Section~\ref{sec:down}: \texttt{--empty-down} stops an idle upf2 once upf1 alone is under the 80\% limit, and \texttt{--drain-timeout} stops upf2 after a fixed time even if it still has sessions.
+
+\section{Results}
+\subsection{RQ1: where one UPF degrades}\label{sec:threshold}
+We offered 10--120~Mbit/s from 4 UEs to one UPF, with four shuffled repetitions per load. All 40 runs were valid (no failed iperf3 client, no dead tunnel). Table~\ref{tab:thr} and Fig.~\ref{fig:sweep} give the medians.
 
 \begin{table}[t]
 \centering
-\caption{One UPF at 0.1 core: medians over four runs.}
+\caption{One UPF at 0.1 core: medians of four runs.}
 \label{tab:thr}
 \footnotesize
-\setlength{\tabcolsep}{2.2pt}
-\begin{tabular}{lrrrrrrrrr}
+\setlength{\tabcolsep}{2.4pt}
+\begin{tabular}{lrrrrrrr}
 \toprule
-Offered (Mbit/s) & 20 & 30 & 40 & 50 & 60 & 70 & 80 & 100 & 120 \\
+Offered (Mbit/s) & 30 & 40 & 50 & 60 & 70 & 80 & 120 \\
 \midrule
-Delivered (Mbit/s) & 20.0 & 30.0 & 39.8 & 49.7 & 59.4 & 66.4 & 67.7 & 66.5 & 63.2 \\
-Loss (\%) & 0.0 & 0.01 & 0.4 & 0.7 & 1.0 & 5.1 & 15.4 & 33.5 & 47.3 \\
-UPF CPU (\% of cap) & 42 & 58 & 71 & 87 & 95 & 98 & 98 & 98 & 98 \\
-Throttled (\%) & 0.9 & 1.7 & 1.5 & 7.6 & 66.7 & 99.7 & 99.7 & 99.6 & 99.6 \\
-RTT p95 (ms) & 0.31 & 0.30 & 0.29 & 0.29 & 3.7 & 10.4 & 13.3 & 15.4 & 16.5 \\
+Delivered (Mbit/s) & 30.0 & 39.8 & 49.7 & 59.4 & 66.4 & 67.7 & 63.2 \\
+Loss (\%) & 0.01 & 0.4 & 0.7 & 1.0 & 5.1 & 15.4 & 47.3 \\
+UPF CPU (\% of cap) & 58 & 71 & 87 & 95 & 98 & 98 & 98 \\
+Throttled (\%) & 1.7 & 1.5 & 7.6 & 66.7 & 99.7 & 99.7 & 99.6 \\
+RTT p95 (ms) & 0.30 & 0.29 & 0.29 & 3.7 & 10.4 & 13.3 & 16.5 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-\begin{figure}[t]
+\begin{figure*}[t]
 \centering
-\includegraphics[width=\columnwidth]{threshold.png}
-\caption{Load sweep for one UPF at 0.1 core.}
-\label{fig:thr}
-\end{figure}
+\includegraphics[width=0.88\textwidth]{sweep.png}
+\caption{Load sweep for one UPF (medians). Left: delivered traffic follows the offered load up to about 60~Mbit/s, then flattens. Right: UPF CPU and throttled periods; the dashed line is the 80\% scale-up trigger.}
+\label{fig:sweep}
+\end{figure*}
 
-Delivered throughput flattens at about 68~Mbit/s, and extra load only adds loss (47\% at 120 offered). The knee is at about 60~Mbit/s: throttling jumps to 67\% of periods and the RTT tail rises from 0.3 to 3.7~ms. Loss alone is a weak early signal (1\% at 60~Mbit/s), while CPU and throttling rise steadily and are the better signals.
+\textbf{Finding 1.} One UPF saturates at about 68~Mbit/s, and degradation starts at about 60~Mbit/s: throttling jumps from 8\% to 67\% of periods and the RTT tail from 0.3 to 3.7~ms, and extra load then only adds loss (47\% at 120~Mbit/s offered). Above 70~Mbit/s, 67--82\% of the lost packets are lost inside the UPF (they arrive on N3 but do not leave on N6); the rest is lost elsewhere on the path.
 
-\textbf{Scaling threshold.} A scale-up takes 5~s of holding time plus 3--7~s for the new UPF to associate, and it helps only sessions created afterwards. The trigger must therefore sit well below the knee. We use \textbf{UPF CPU $\geq$ 80\% of its cap} (or $\geq$ 50\% of periods throttled while CPU $\geq$ 75\%), held for 5~s, measured with a 3~s moving average. In this sweep that is about 46~Mbit/s (interpolated between the 40 and 50~Mbit/s points), roughly three quarters of the knee and two thirds of the capacity. A load of 30~Mbit/s (58\% CPU) never triggers it.
+\textbf{Finding 2.} Loss is a weak early warning (1\% at 60~Mbit/s), whereas CPU and throttling rise steadily and are usable triggers. A scale-up takes 5~s of holding plus 3--7~s for upf2 to associate, and it helps only sessions created afterwards, so the trigger must fire well before the knee. We use \textbf{CPU $\geq$ 80\% of the cap for 5~s} (or throttling $\geq$ 50\% while CPU $\geq$ 75\%), measured with a 3~s moving average. In this sweep that is about 46~Mbit/s, three quarters of the knee and two thirds of the capacity. The threshold is a design choice derived from this sweep; we did not sweep it.
 
-\textbf{Thresholds as percentages.} The cap is CPU time, so how many Mbit/s fit in it depends on the host. An earlier calibration on the same laptop with a slower CPU setting gave a capacity of 46~Mbit/s instead of 68, yet the same percentage thresholds again landed at about three quarters of the knee. We therefore express thresholds as a share of the cap and take all reported numbers from one session.
+\textbf{Thresholds as a share of the cap.} Because the cap is CPU time, the Mbit/s that fit in it depend on the host. An earlier calibration on the same laptop at a slower CPU setting gave a capacity of 46~Mbit/s instead of 68, yet the same percentages again fell at about three quarters of the knee. We therefore express thresholds as a share of the cap and take all reported numbers from a single session.
 
-\section{Adding a Second UPF}\label{sec:second}
-\subsection{Configuration}
-The SMF is started with both UPF addresses in its list; only the first UPF runs at the start. The SMF keeps retrying the PFCP association with the absent one (about every 11~s) and uses it as soon as it answers, so no restart is needed. Table~\ref{tab:cfg} lists what must be set.
+\subsection{RQ2: adding a UPF and distributing sessions}\label{sec:second}
+\textbf{Joining at runtime.} The SMF is started with both UPF addresses in its list while only upf1 runs. It keeps retrying the PFCP association with the absent UPF (about every 11~s) and uses it as soon as it answers, so no restart is needed. Table~\ref{tab:cfg} lists the settings required; the AMF and gNB need no UPF-specific settings, because the gNB learns each session's N3 address from the core.
 
 \begin{table}[t]
 \centering
@@ -111,153 +138,95 @@ Compose: own N3/N4/N6 IPs & Separate interfaces per UPF; a profile keeps upf2 of
 \end{tabular}
 \end{table}
 
-The AMF and gNB need no UPF-specific settings: the gNB learns each session's N3 address from the core.
+\textbf{Session distribution.} We captured PFCP on N4 and GTP-U on N3 (inside the core and gNB containers, so the UPFs pay nothing for the capture) with both UPFs up and 6 new UEs per run, for 3 runs. In all 18 sessions the SMF chose the UPFs strictly in turn (Table~\ref{tab:trace}), and in every case the GTP-U packets carrying the session's tunnel endpoint ID (TEID) reached the UPF named in the PFCP Session Establishment. \textbf{Finding 3:} Open5GS places new sessions in round-robin order, independent of load.
 
-\subsection{Session distribution}
-We captured PFCP on N4 and GTP-U on N3 (on the core and gNB containers, so the UPFs pay nothing for the capture) with both UPFs up and 6 new UEs per run, 3 runs. In all 18 sessions the SMF chose the UPFs strictly alternately (upf2, upf1, upf2, \dots), and in every case the GTP-U packets carrying the session's tunnel endpoint ID (TEID) reached the UPF named in the PFCP Session Establishment. Placement is therefore round-robin and does not depend on load.
-
-\begin{table}[t]
+\begin{table}[H]
 \centering
-\caption{UPF chosen by the SMF for each new session (PFCP Session Establishment, in order). The GTP-U packets of every session reached that same UPF, 6 of 6 in each run.}
+\caption{UPF chosen by the SMF for each new session, in order (same in all 3 runs). The GTP-U traffic of every session reached that UPF, 6 of 6 per run.}
 \label{tab:trace}
 \footnotesize
 \setlength{\tabcolsep}{4pt}
-\begin{tabular}{cllllll}
+\begin{tabular}{lllllll}
 \toprule
-Run & 1 & 2 & 3 & 4 & 5 & 6 \\
+Session & 1 & 2 & 3 & 4 & 5 & 6 \\
 \midrule
-1--3 & upf2 & upf1 & upf2 & upf1 & upf2 & upf1 \\
+UPF & upf2 & upf1 & upf2 & upf1 & upf2 & upf1 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-\section{Controller}\label{sec:ctrl}
-The controller (a short Python script) runs once per second and uses only the Docker API.
-\begin{enumerate}
-\item \textbf{Scale up:} if upf1 stays over the threshold of Section~\ref{sec:threshold} for 5~s, start upf2 and wait for the SMF's PFCP association.
-\item \textbf{Scale down:} if total UPF CPU stays below 35\% of one cap for 20~s \emph{and} upf2 has 0 sessions, stop upf2. The SMF cannot be told to stop choosing a UPF, so stopping one with live sessions would cut them.
-\item A 30~s cooldown after each action prevents flapping.
-\end{enumerate}
-Two options are used in the scale-down study: \texttt{--empty-down} also stops upf2 once it has been empty for 20~s while upf1 alone is under the 80\% limit, and \texttt{--drain-timeout} stops upf2 even with sessions after a fixed time.
+\subsection{RQ3: scaling up}\label{sec:compare}
+Table~\ref{tab:cmp} and Fig.~\ref{fig:ramp} compare the three set-ups. Values are the steady state, from 10~s after the last UE joined until the first leaves.
 
-Checks: no scale-up at idle (35~s, both UPFs under 1\% CPU), none during any of the 15 ramp-downs, and no scale-down while load was high.
-
-\section{One UPF vs.\ Scaling vs.\ Two UPFs}\label{sec:compare}
-A new UE joins every 20~s, each sending 12~Mbit/s of UDP uplink, up to 8 UEs (96~Mbit/s): about 1.4 times one UPF's capacity but within two UPFs'. Each run starts a fresh stack; there are 3 repetitions per set-up, interleaved. Table~\ref{tab:cmp} gives the steady state, from 10~s after the last UE joined until the first one leaves; loss is that of all traffic in this window.
-
-\begin{table*}[t]
+\begin{table}[H]
 \centering
 \caption{Steady state at 96~Mbit/s offered, mean (min--max) of 3 runs.}
 \label{tab:cmp}
-\footnotesize
-\setlength{\tabcolsep}{3pt}
+\scriptsize
+\setlength{\tabcolsep}{2pt}
 \begin{tabular}{lrrrr}
 \toprule
-Set-up & Delivered (Mbit/s) & Loss (\%) & RTT (ms) & UEs on upf2 \\
+Set-up & Delivered & Loss & RTT & UEs on \\
+ & (Mbit/s) & (\%) & (ms) & upf2 \\
 \midrule
-1 UPF & 69.3 (68.8--69.6) & 27.9 (27.5--28.3) & 8.7 (8.4--9.1) & 0 of 8 \\
-Controller adds upf2 & 92.3 (91.2--93.6) & 3.9 (2.5--5.0) & 3.7 (3.5--4.1) & 2 of 8 \\
-2 UPFs from start & 96.0 (96.0--96.0) & 0.0 & 0.8 (0.7--1.0) & 4 of 8 \\
-\bottomrule
-\end{tabular}
-\end{table*}
-
-\begin{table}[t]
-\centering
-\caption{Every run behind Table~\ref{tab:cmp}. CPU is a share of the UPF's cap.}
-\label{tab:runs}
-\footnotesize
-\setlength{\tabcolsep}{2.5pt}
-\begin{tabular}{lrrrrrrr}
-\toprule
-Run & Deliv. & Loss & RTT & upf1 & upf2 & UEs on & Scale-up \\
- & (Mbit/s) & (\%) & (ms) & CPU & CPU & upf2 & at (s) \\
-\midrule
-single 1 & 68.8 & 28.3 & 9.1 & 100 & -- & 0 & -- \\
-single 2 & 69.6 & 27.5 & 8.5 & 100 & -- & 0 & -- \\
-single 3 & 69.4 & 27.7 & 8.4 & 100 & -- & 0 & -- \\
-controller 1 & 91.2 & 5.0 & 4.1 & 100 & 24 & 2 & 70 \\
-controller 2 & 93.6 & 2.5 & 3.5 & 100 & 22 & 2 & 69 \\
-controller 3 & 92.0 & 4.2 & 3.7 & 100 & 23 & 2 & 70 \\
-static 1 & 96.0 & 0.0 & 0.7 & 92 & 88 & 4 & -- \\
-static 2 & 96.0 & 0.0 & 1.0 & 88 & 93 & 4 & -- \\
-static 3 & 96.0 & 0.0 & 0.8 & 90 & 85 & 4 & -- \\
+Default (1 UPF) & 69.3 (68.8--69.6) & 27.9 (27.5--28.3) & 8.7 (8.4--9.1) & 0 of 8 \\
+Ours (controller) & 92.3 (91.2--93.6) & 3.9 (2.5--5.0) & 3.7 (3.5--4.1) & 2 of 8 \\
+Upper bound (2 UPFs) & 96.0 (96.0--96.0) & 0.0 & 0.8 (0.7--1.0) & 4 of 8 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-\begin{figure}[t]
+\begin{figure*}[t]
 \centering
-\includegraphics[width=\columnwidth]{single_r2_ramp.png}
-\caption{Ramp with one UPF (repetition 2): delivered traffic stops growing at about 69~Mbit/s once the 6th UE joins.}
+\includegraphics[width=0.88\textwidth]{ramp.png}
+\caption{Ramp to 96~Mbit/s offered (mean of 3 runs). With one UPF, delivered traffic stops near 69~Mbit/s and loss climbs to about 28\%. The controller starts upf2 at 69--70~s, while the load is still below capacity.}
 \label{fig:ramp}
-\end{figure}
+\end{figure*}
 
-The controller fired at 69--70~s in all three runs, right after the 4th UE joined (48~Mbit/s, upf1 over 80\%), and upf2 was associated 5.4--6.5~s later (3.3--6.5~s over all 15 controller runs of Sections~\ref{sec:compare} and~\ref{sec:down}). The ranges of the three set-ups do not overlap. Loss falls from 27.9\% to 3.9\% and RTT from 8.7 to 3.7~ms.
+\textbf{Finding 4.} The controller cuts loss at 96~Mbit/s from 27.9\% to 3.9\% (86\% less) and RTT from 8.7 to 3.7~ms; the ranges of the three set-ups do not overlap. It fired at 69--70~s in all three runs, right after the fourth UE joined (48~Mbit/s, upf1 above 80\%), and upf2 was usable 5.4--6.5~s later (3.3--6.5~s over all 15 controller runs in this paper).
 
-The scaled set-up does not reach the 0.0\% of the static one, for two reasons that Section~\ref{sec:second} explains. First, the 4 UEs placed before the scale-up stay on upf1 to the end, because sessions never move. Second, new sessions keep alternating, so UEs~6 and~8 still go to the busy upf1, which ends up with 6 UEs (72~Mbit/s) against a capacity of about 68. UEs~5 and~7 on upf2 see 0.0\% loss. (Per-UE loss, for example 1.9\% on average for the UEs on upf1, is taken over each UE's whole run, including the time before saturation, so it is lower than the steady-state figure.)
+\textbf{Why not 0.0\%?} Two properties of Open5GS from Finding 3 explain it, and simple arithmetic confirms them. The four UEs placed before the scale-up stay on upf1, and new sessions keep alternating, so UEs~5 and~7 land on upf2 but UEs~6 and~8 still land on upf1. Upf1 then carries 6 UEs, 72~Mbit/s against a capacity of about 68, which is roughly 4~Mbit/s lost out of 96, i.e.\ about 4\%. The two UEs on upf2 see no loss. With the upper bound, each UPF carries 48~Mbit/s and nothing is lost.
 
-\section{Removing the Second UPF}\label{sec:down}
-After 60~s at full load, one UE stops traffic and deregisters cleanly (\texttt{deregister switch-off}) every 20~s. UEs~5 and~7 are on upf2 in every run. Five variants, 3 runs each (Table~\ref{tab:down}); ``fits on one'' means offered load below 45~Mbit/s.
+\subsection{RQ3: scaling down}\label{sec:down}
+After 60~s at full load, one UE stops its traffic and deregisters cleanly every 20~s. UEs~5 and~7 are on upf2 in every run. We compare five ways of ending the ramp, three runs each (Table~\ref{tab:down}, Fig.~\ref{fig:down}); ``fits on one'' means an offered load below 45~Mbit/s.
 
-\begin{table}[t]
+\begin{table}[H]
 \centering
-\caption{Scale-down variants (means of 3 runs). upf2 idle: time upf2 ran with 0 sessions. Both UPFs after fit: time both ran after the load fitted on one. lifoearly is lifo with \texttt{--empty-down}; forced is upf2last with \texttt{--drain-timeout 30}.}
+\caption{Scale-down scenarios (means of 3 runs). ``Stopped'' is when upf2 was stopped; ``Extra'' is how long both UPFs kept running after the load fitted on one.}
 \label{tab:down}
 \footnotesize
 \setlength{\tabcolsep}{2.5pt}
-\begin{tabular}{>{\raggedright\arraybackslash}p{1.2cm}>{\raggedright\arraybackslash}p{1.5cm}>{\raggedright\arraybackslash}p{1.1cm}>{\raggedright\arraybackslash}p{1.1cm}>{\raggedright\arraybackslash}p{1.1cm}>{\raggedright\arraybackslash}p{1.4cm}}
+\begin{tabular}{>{\raggedright\arraybackslash}p{3.3cm}rr>{\raggedright\arraybackslash}p{2.1cm}}
 \toprule
-Variant & UEs leave & upf2 stopped (s) & upf2 idle (s) & Both UPFs after fit (s) & Lost \\
+Scenario & Stopped (s) & Extra (s) & Cost \\
 \midrule
-fifo & 1, 2, \dots, 8 & 365 & 25 & 64 & nothing \\
-lifo & 8, 7, \dots, 1 & 366 & 86 & 65 & nothing \\
-lifoearly & 8, 7, \dots, 1 & 326 & 45 & 25 & nothing \\
-upf2last & upf2's UEs last & 451 & 0 & 150 & nothing \\
-forced & upf2's UEs last & 381 & 0 & 80 & 10.7~s, new IP \\
+Wait for 0 sessions, UEs leave in arrival order & 365 & 64 & none \\
+Wait, UEs leave in reverse order & 366 & 65 & none \\
+Reverse order, idle upf2 stopped early & 326 & 25 & none \\
+Wait, upf2's UEs leave last & 451 & 150 & none \\
+Forced stop after 30~s & 381 & 80 & 10.7~s outage, new IP \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-\begin{figure}[t]
+\begin{figure*}[t]
 \centering
-\includegraphics[width=\columnwidth]{lifo_r2_ramp.png}
-\caption{Ramp-down (repetition 2): default rule vs.\ \texttt{--empty-down}.}
+\includegraphics[width=0.88\textwidth]{down.png}
+\caption{Ramp-down (repetition 2). Top: the load falls as UEs leave. Bottom: number of running UPFs under the default rule and with the early stop of an idle upf2.}
 \label{fig:down}
-\end{figure}
+\end{figure*}
 
-\begin{figure}[t]
-\centering
-\includegraphics[width=\columnwidth]{upf2last_r2_ramp.png}
-\caption{Ramp-down where upf2's UEs leave last (repetition 2): waiting for the last session (graceful) vs.\ \texttt{--drain-timeout} (forced).}
-\label{fig:down2}
-\end{figure}
+\textbf{Finding 5.} Waiting for 0 sessions loses nothing in all 12 runs that waited (mean loss at most 0.06\%), but the wait has no upper bound: in the fourth scenario one 12~Mbit/s UE kept upf2 running for 150~s after one UPF was enough, and it would have stayed forever had the UE not left. An empty upf2 is waste, so stopping it early saves 40~s at no cost; the controller still waits while upf1 is busy. Forcing the stop bounds the wait but costs traffic: the SMF noticed the missing UPF only through missed PFCP heartbeats, the affected UE re-established its session on upf1 with a \emph{new IP address}, and it had no traffic for 10.7~s (10--12~s) in 3 of 3 runs. We also saw no false scale-up at idle (35~s, both UPFs under 1\% CPU), none during any of the 15 ramp-downs, and no scale-down while load was high.
 
-\begin{itemize}
-\item \textbf{Waiting for 0 sessions loses nothing} in all 12 runs that waited (mean loss at most 0.06\%), but it has no upper bound. In upf2last, one 12~Mbit/s UE kept upf2 running for 150~s after one UPF would have been enough, and would have kept it forever had it never left.
-\item \textbf{An empty upf2 is waste.} In lifo, upf2 ran 86~s with no sessions. \texttt{--empty-down} stops it 40~s sooner at no cost, because an empty UPF carries no traffic, and it still waits while upf1 is busy.
-\item \textbf{Forcing bounds the wait but costs traffic.} After stopping upf2 with a live session, the SMF noticed only through missed PFCP heartbeats and released the session. The UE re-established it on upf1 with a \emph{new IP address}: 10.7~s (10--12) without traffic in 3 of 3 runs. An application bound to the old address would have to reconnect.
-\end{itemize}
+\section{Discussion}
+\textbf{Limits of dynamic scaling in Open5GS.} (1)~Selection is round-robin, not load-aware; the only selectors are static (DNN, TAC, cell ID), so after a scale-up every other new UE still goes to the saturated UPF. (2)~Existing sessions never move, so scaling relieves only future load. (3)~A UPF cannot be drained: the SMF cannot be told to stop choosing it, and a UE that dies without deregistering left its session on upf2 for over 60~s. Scale-down is therefore all-or-nothing, either wait or cut. (4)~Scale-up is slow: 5~s of holding plus 3--7~s of association. (5)~Because both UPFs share one UE pool, the data network needs NAT on N6.
 
-\section{Limitations of Dynamic UPF Scaling in Open5GS}\label{sec:limits}
-\begin{enumerate}
-\item \textbf{Selection is round-robin, not load-aware.} The only selectors are static (DNN, TAC, cell ID). After scale-up, every other new UE still goes to the saturated UPF.
-\item \textbf{Existing sessions never move.} Scaling relieves only future load.
-\item \textbf{No graceful drain.} The SMF cannot be told to stop choosing a UPF. A UE that dies without deregistering left its session counted on upf2 for over 60~s, so upf2 is never retired.
-\item \textbf{Scale-down is all-or-nothing per UPF.} The controller can only wait or cut; it cannot move the last UE to upf1 first.
-\item \textbf{Scale-up is slow:} 5~s hold plus 3--7~s (up to the SMF's 11~s retry period) before upf2 is used.
-\item \textbf{A shared UE pool needs NAT on N6.} The data network sees the UPF's address, not the UE's.
-\item \textbf{Thresholds are host-dependent in Mbit/s}, so they must be re-derived per host and cap, and kept as a share of the cap.
-\item \textbf{Per-second signals are noisy} (throttling swings by 10--15 points at steady load); smoothing and a hold time are required.
-\end{enumerate}
-
-\section{Threats to Validity}
-The 0.1-core cap is artificial and capacity is in CPU-time units, not real UPF throughput. Traffic is uplink UDP from simulated UEs; there is one gNB, one slice and at most two UPFs. Each set-up has only three repetitions, though the ranges are far apart, and all results come from one host in one session. An earlier session on the same laptop, with a slower CPU setting, showed the same qualitative picture (1 UPF: 19.3\% loss, controller: 0.5\%, 2 UPFs: 0.0\% at 64~Mbit/s), but with different absolute numbers. The host must also be quiet: one repetition was discarded after other applications exhausted memory.
+\textbf{Threats to validity.} The 0.1-core cap is artificial. Traffic is uplink UDP from simulated UEs, with one gNB, one slice and at most two UPFs. Each set-up has three repetitions, though the ranges are far apart, and all numbers come from one host in one session; an earlier session on the same laptop at a slower CPU setting showed the same picture at different absolute values (1 UPF: 19.3\% loss, controller: 0.5\%, 2 UPFs: 0.0\% at 64~Mbit/s). The 80\% threshold was chosen, not tuned. The host must also be quiet: one repetition was discarded after other applications exhausted its memory.
 
 \section{Conclusion}
-At a 0.1-core cap one UPF carries about 68~Mbit/s and degrades from about 60. A controller using only UPF CPU, with a threshold about three quarters of the way to the knee, can add a second UPF without restarting the core, cutting loss at 96~Mbit/s from 27.9\% to 3.9\%. The remaining loss comes from Open5GS itself: strict round-robin placement and sessions that never move. Removal is safe if the controller waits for the second UPF to empty, but the wait is unbounded, and forcing it costs the affected UE about 11~s and its IP address. A core that could place new sessions by load, or move or steer sessions away from a draining UPF, would remove both problems.
+At a 0.1-core cap one UPF carries about 68~Mbit/s and degrades from about 60. A controller that uses only UPF CPU, with a trigger at three quarters of the way to the knee, adds a second UPF without restarting the core and removes 86\% of the loss at 96~Mbit/s. The remaining loss comes from Open5GS itself, which places sessions in strict round-robin order and never moves them. Removing the second UPF is safe if the controller waits for it to empty, but the wait is unbounded, and forcing it costs the affected UE about 11~s and its IP address. Next steps are to re-establish some PDU sessions after a scale-up and to make UPF selection load-aware in the SMF.
 
-\textbf{Code and data.} Everything is in the project repository, submitted separately. Table~\ref{tab:thr} comes from \texttt{results/final/threshold.csv} (one row per run, with a validity flag, host load and power state); Tables~\ref{tab:cmp}--\ref{tab:down} from the per-second timelines and per-UE files in \texttt{results/final/ramp/} (\texttt{summary.md} holds the full tables, \texttt{host.txt} the host state); Table~\ref{tab:trace} from the N4 and N3 captures in \texttt{results/linux/trace\_r1..r3/} (\texttt{.pcap}, openable in Wireshark, with \texttt{sessions.csv}). \texttt{results/linux/} also holds the earlier calibration. The whole final session reruns with \texttt{final.sh}.
+\textbf{Code and data.} Everything is in the project repository, submitted separately. Table~\ref{tab:thr} comes from \texttt{results/final/threshold.csv}; Tables~\ref{tab:cmp} and~\ref{tab:down} from the per-second timelines in \texttt{results/final/ramp/} (\texttt{summary.md} holds every run, \texttt{host.txt} the host state); Table~\ref{tab:trace} from the N4 and N3 captures in \texttt{results/linux/trace\_r1..r3/} (\texttt{.pcap}, openable in Wireshark). The whole final session reruns with \texttt{final.sh}.
 
 \begin{thebibliography}{1}
 \bibitem{ts23501} 3GPP, ``System architecture for the 5G System (5GS),'' TS 23.501.

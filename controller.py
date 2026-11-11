@@ -15,10 +15,10 @@ from sweep import P, cap, cpu_stat, run, running, sessions
 # From results/final/threshold.csv (UPF_QUOTA=1000 = 0.1 core, 4 UEs, 4 shuffled runs per load, medians, 40/40 valid, 2026-11-10):
 # delivered throughput flattens at ~68 Mbit/s; at 60 Mbit/s throttling (67% of periods) and the RTT tail (p95 3.7 ms) jump, and
 # from 70 Mbit/s the UPF is throttled in nearly every period. Scale-up takes UP_HOLD + 0-11 s (the SMF retries the PFCP
-# association about every 11 s; 3.3-6.5 s measured) and only helps sessions set up afterwards, so it triggers at ~2/3 of the knee:
+# association about every 11 s; 3.3-6.5 s measured) and only helps sessions set up afterwards, so it triggers at ~3/4 of the knee (2/3 of capacity):
 # CPU 80% of cap is ~45 Mbit/s (71% at 40, 87% at 50; 30 Mbit/s sits at 58%, so it stays quiet there).
 # The earlier calibration (results/linux/, 2026-10-19, slower CPU setting: knee ~40, capacity ~46 Mbit/s) put the same % at the
-# same 2/3 of its knee. Percentages are of the UPF's own cap: re-check them for a different UPF_QUOTA or host.
+# same ~3/4 of its knee. Percentages are of the UPF's own cap: re-check them for a different UPF_QUOTA or host.
 UP_THROTTLED, UP_CPU, UP_HOLD = 50.0, 80.0, 5     # % of periods throttled / % of cap, seconds
 THR_MIN_CPU = 75.0     # throttling only counts when the UPF is actually busy
 DOWN_SUM_CPU, DOWN_HOLD = 35.0, 20                # total CPU (% of one cap) of all UPFs; merged onto one UPF it would sit at about half of UP_CPU

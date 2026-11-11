@@ -47,11 +47,11 @@ Final measurements: 12-core Linux laptop, AC power, CPU governor `performance`, 
 
 **In short:**
 - **Capacity:** one UPF carries ~68 Mbit/s; strain (throttling, RTT tail) starts at ~60 Mbit/s.
-- **Controller:** scales up at **CPU ≥ 80% of the cap for 5 s** (~45 Mbit/s, 2/3 of the knee), 15/15 runs at 69–73 s; upf2 usable 3.3–6.5 s after the controller acts. No core restart.
+- **Controller:** scales up at **CPU ≥ 80% of the cap for 5 s** (~45 Mbit/s, about 3/4 of the knee), 15/15 runs at 69–73 s; upf2 usable 3.3–6.5 s after the controller acts. No core restart.
 - **Scale-up helps, but only partly:** loss 27.9% → 3.9%, not 0%: existing sessions never move and round-robin still sends every other new UE to the busy upf1 (phase 6: 18/18 sessions round-robin).
-- **Graceful scale-down is safe but unbounded:** 0 traffic lost in 15/15 runs, but upf2 stays until its last session ends: one long-lived session kept it 150 s past the point one UPF would do.
+- **Graceful scale-down is safe but unbounded:** no packets lost in the 12 runs that waited (mean loss at most 0.06%), but upf2 stays until its last session ends: one long-lived session kept it 150 s past the point one UPF would do.
 - **Stopping upf2 once it is empty** (`--empty-down`) retires it 40 s sooner at no cost. **Forcing** it bounds the wait but cuts the session: ~11 s outage and a new UE IP.
-- **Thresholds carry over between host settings:** an earlier calibration (2026-10-19, slower CPU setting: capacity ~46 Mbit/s) scaled up at the same 2/3 of its knee with the same % thresholds. See [WRITEUP.md](WRITEUP.md) for both runs and all limitations.
+- **Thresholds carry over between host settings:** an earlier calibration (2026-10-19, slower CPU setting: capacity ~46 Mbit/s) scaled up at about the same 3/4 of its knee with the same % thresholds. See [WRITEUP.md](WRITEUP.md) for both runs and all limitations.
 
 ## Requirements
 Linux with Docker + Compose (final runs) or Docker Desktop (Mac, for debugging). Give Docker at least 4 CPUs / 4 GB. Python 3 with matplotlib for the plots.

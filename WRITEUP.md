@@ -5,7 +5,7 @@ Each UPF is capped at **0.1 core** (`UPF_QUOTA=1000` over a 10 ms period) so tha
 
 ![Architecture and controller loop](architecture.png)
 
-**Result:** one UPF at 0.1 core carries about **68 Mbit/s**, and strain starts at about **60 Mbit/s**. With 96 Mbit/s offered, adding a second UPF on demand cut loss from **27.9% to 3.9%** and RTT from **8.7 to 3.7 ms**. Starting with two UPFs gave 0.0% and 0.8 ms; the gap comes from the core's round-robin placement and from sessions never moving (section 3). Removing the second UPF again is safe when it waits for upf2 to empty (0 traffic lost in 15/15 runs), but that wait has no upper bound: one long-lived session kept upf2 running 150 s after one UPF would have been enough. Stopping upf2 as soon as it is empty saves 40 s at no cost; stopping it while it still has sessions costs those UEs ~11 s and their IP address.
+**Result:** one UPF at 0.1 core carries about **68 Mbit/s**, and strain starts at about **60 Mbit/s**. With 96 Mbit/s offered, adding a second UPF on demand cut loss from **27.9% to 3.9%** and RTT from **8.7 to 3.7 ms**. Starting with two UPFs gave 0.0% and 0.8 ms; the gap comes from the core's round-robin placement and from sessions never moving (section 3). Removing the second UPF again is safe when it waits for upf2 to empty (no packets lost in the 12 runs that waited; mean loss at most 0.06%), but that wait has no upper bound: one long-lived session kept upf2 running 150 s after one UPF would have been enough. Stopping upf2 as soon as it is empty saves 40 s at no cost; stopping it while it still has sessions costs those UEs ~11 s and their IP address.
 
 The final numbers were measured in one session (`final.sh`) on one machine: a 12-core Linux laptop (HP Pavilion Gaming 15) on AC power, CPU governor `performance`, nothing else running (host load 0.3), on 2026-11-10. Raw data is in `results/final/`, all tables in `results/final/summary.md`. An earlier calibration (2026-10-19, `results/linux/`) is compared at the end of the phase 3 section.
 
@@ -27,10 +27,10 @@ The final numbers were measured in one session (`final.sh`) on one machine: a 12
 
 - **Capacity:** delivered throughput flattens at about 68 Mbit/s; past it extra load only adds loss (47% at 120 offered).
 - **Knee:** at 60 Mbit/s throttling jumps to 67% of periods and the RTT tail to 3.7 ms; from 70 Mbit/s the UPF is throttled in nearly every period.
-- **Threshold:** the controller scales up at **CPU ≥ 80% of the cap** (or ≥ 50% throttled while CPU ≥ 75%), held for 5 s. Here that is ~45 Mbit/s (71% at 40, 87% at 50), about 2/3 of the knee, because a scale-up takes 5 s plus 3–7 s for the association and only helps sessions placed afterwards. 30 Mbit/s (58% CPU) never triggers it.
+- **Threshold:** the controller scales up at **CPU ≥ 80% of the cap** (or ≥ 50% throttled while CPU ≥ 75%), held for 5 s. Here that is ~45 Mbit/s (71% at 40, 87% at 50), about 3/4 of the knee (2/3 of the capacity), because a scale-up takes 5 s plus 3–7 s for the association and only helps sessions placed afterwards. 30 Mbit/s (58% CPU) never triggers it.
 - **Cap, not host speed:** the cap is CPU time (1 ms per 10 ms), so how many Mbit/s fit in it depends on the CPU.
 
-**Earlier calibration, same cap, slower CPU setting** (2026-10-19, `results/linux/linux_threshold_q1000.csv`, 32/32 valid): capacity ~46 Mbit/s, knee ~40 Mbit/s, 80% of the cap reached at ~30 Mbit/s. The Mbit/s moved by ~1.5x between the two host settings, but **the same % thresholds** landed at 2/3 of the knee both times, and the phase 7 comparison gave the same picture (1 UPF 19.3% loss, controller 0.5%, 2 UPFs 0.0% at 64 Mbit/s). This is why the thresholds are kept as % of the cap, and why all final numbers come from one session.
+**Earlier calibration, same cap, slower CPU setting** (2026-10-19, `results/linux/linux_threshold_q1000.csv`, 32/32 valid): capacity ~46 Mbit/s, knee ~40 Mbit/s, 80% of the cap reached at ~30 Mbit/s. The Mbit/s moved by ~1.5x between the two host settings, but **the same % thresholds** landed at about 3/4 of the knee both times, and the phase 7 comparison gave the same picture (1 UPF 19.3% loss, controller 0.5%, 2 UPFs 0.0% at 64 Mbit/s). This is why the thresholds are kept as % of the cap, and why all final numbers come from one session.
 
 ### Phases 4–5: second UPF and controller
 
@@ -40,7 +40,7 @@ The final numbers were measured in one session (`final.sh`) on one machine: a 12
 | Scale-up under load (15 runs) | Fired at 69–73 s, after the 4th UE joined (48 Mbit/s, upf1 CPU crossing 80%). UPF2 associated 3.3–6.5 s after the controller acted |
 | No false scale-up at idle | 35 s idle with both UPFs at < 1% CPU: no scale-up (`results/linux/scale_down_controller.csv`) |
 | No flapping | No scale-up during any of the 15 ramp-downs, and no scale-down while load was high |
-| Scale-down only at 0 sessions | 15/15 graceful scale-downs happened with upf2 at 0 sessions; 0% loss during the ramp-down (phase 8) |
+| Scale-down only at 0 sessions | 12/12 scale-downs that waited happened with upf2 at 0 sessions, with no packet loss during the ramp-down (mean at most 0.06%); the other 3 runs were forced stops (phase 8) |
 | UPF crash visible | `upf.sh` `exec`s the UPF, so when the UPF exits the container shows `Exited` instead of staying `Up` (tested with SIGTERM) |
 
 ### Phase 6: how new sessions are distributed (`results/linux/trace_r{1,2,3}/`)
@@ -88,7 +88,7 @@ Same runs as phase 7, continued: after the 60 s hold at full load, one UE stops 
 - **An empty upf2 is waste, not safety.** In lifo, upf2 ran 86 s with no sessions while upf1 carried everything. `--empty-down` stops it once it has been empty for 20 s and upf1 alone is under the 80% limit: 40 s sooner, with no loss, because an empty UPF carries no traffic. It still waits while upf1 is busy, so a new UE arriving then still gets upf2.
 - **A graceful drain has no upper bound.** In upf2last, one UE (12 Mbit/s) kept upf2 alive for 150 s after one UPF would have been enough, and would have kept it forever if it never left.
 - **Forcing bounds it, at a price.** With `--drain-timeout 30`, upf2 was stopped 30 s after the low-load condition held. The SMF noticed only by missed PFCP heartbeats, released the session, and the UE re-established it on upf1 with a **new IP**: 10.7 s (10–12) without traffic, matching the 10–16 s measured earlier. Its old connection (iperf3 bound to the old IP) did not recover; a real application would have to reconnect.
-- **Nothing else was disturbed:** 0% loss during all 15 ramp-downs, and no scale-up was triggered while UEs were leaving.
+- **Nothing else was disturbed:** No packet loss in the 12 runs that waited for 0 sessions (mean at most 0.06%), and no scale-up was triggered while UEs were leaving.
 
 ## 1. Core configuration needed for two UPFs
 
@@ -125,9 +125,9 @@ See the lower half of the architecture figure for the loop and the 1 UPF → 2 U
 | 2 | **Existing sessions never move** | Phase 7: the 4 UEs placed before scale-up stay on upf1 to the end | Scaling relieves only *future* load. Hence scaled (3.9% loss) vs static (0.0%) |
 | 3 | **No graceful drain.** The SMF cannot be told to stop picking a UPF, and a UE that dies without deregistering leaves its session behind | Phase 6: the SMF keeps selecting upf2 while it is associated. Phase 8: one long-lived session kept upf2 running 150 s after the load fit on one UPF. A UE killed without deregistering was still counted on upf2 after 60 s | Scale-down waits until upf2's sessions end, for an unbounded time. UEs must deregister cleanly, or upf2 is never retired |
 | 4 | **Stopping a UPF that has sessions cuts them** | upf2 stopped with a live UE on it: the SMF noticed only by missed PFCP heartbeats (10 s and 16 s in two early runs). It released the session, and the UE re-established it on upf1 with a **new IP**. Phase 8, `--drain-timeout`: 10.7 s (10–12) without traffic in 3/3 runs | Such a UE loses ~11 s of traffic and its address. By default the controller stops upf2 only at 0 sessions; `--drain-timeout` trades that outage for a bounded drain |
-| 5 | **Scale-up takes 5 s plus 0–11 s** | Hold 5 s; the SMF retries the association every ~11 s. Measured 3.3–6.5 s after the controller acted (15 runs) | Thresholds must sit well below the knee (here 2/3), or the burst is over before upf2 helps |
+| 5 | **Scale-up takes 5 s plus 0–11 s** | Hold 5 s; the SMF retries the association every ~11 s. Measured 3.3–6.5 s after the controller acted (15 runs) | Thresholds must sit well below the knee (here about 3/4), or the burst is over before upf2 helps |
 | 6 | **Shared UE pool needs NAT on N6** | Section 1 | The DN sees the UPF's address, not the UE's. Per-UE identity is only visible on N3 (inner IP in GTP-U) |
-| 7 | **Mbit/s per cap depend on the host** | The cap is CPU time: 0.1 core carried ~46 Mbit/s on 2026-10-19 and ~68 Mbit/s on 2026-11-10 on the same laptop (different CPU setting). The same % thresholds still triggered at 2/3 of the knee both times | Re-run phase 3 per host and per `UPF_QUOTA`. Keep the thresholds as % of the cap, and take all reported numbers from one session |
+| 7 | **Mbit/s per cap depend on the host** | The cap is CPU time: 0.1 core carried ~46 Mbit/s on 2026-10-19 and ~68 Mbit/s on 2026-11-10 on the same laptop (different CPU setting). The same % thresholds still triggered at about 3/4 of the knee both times | Re-run phase 3 per host and per `UPF_QUOTA`. Keep the thresholds as % of the cap, and take all reported numbers from one session |
 | 8 | **Per-second signals are noisy** | Throttled periods swing ±10–15 points second to second at a steady load | The controller smooths over 3 s and requires 5 s above the threshold |
 | 9 | **The test bed limits what can be shown** | 0.1-core cap is artificial; UERANSIM tops out ~200 Mbit/s; uplink UDP only; one gNB, one DNN/slice, at most 2 UPFs | Absolute Mbit/s figures are not real UPF capacities. The *shape* (knee, relief, round-robin effect) is the result |
 | 10 | **The host must be quiet** | A repetition was discarded after VS Code + Chrome filled RAM/swap (load 88, OOM kills) | Run final measurements with nothing else open. `sweep.py` logs host load and power per row; `final.sh` records the host state |

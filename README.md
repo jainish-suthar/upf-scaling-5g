@@ -3,6 +3,7 @@
 Open5GS 2.8.0 (core) + UERANSIM 3.2.6 (gNB, UEs) + one iperf3 data network, all in Docker Compose.
 Find the load at which one UPF degrades, add a second UPF automatically when that load is reached, and show that it helps.
 Design: `DESIGN.md` · full write-up (config parameters, results, limitations): **[WRITEUP.md](WRITEUP.md)**.
+Report (IEEE format, 5 pages): [report/main.pdf](report/main.pdf), source `report/main.tex`.
 
 ![Architecture](architecture.png)
 

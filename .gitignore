@@ -3,8 +3,14 @@ __pycache__/
 *.pyc
 .venv/
 .env
+*.zip
+# run logs stay local; the CSVs they describe are the data
 *.log
+# captures are data in results/ (phase 6 traces), but not anywhere else
 *.pcap
 *.pcapng
+!results/**/*.pcap
+# old Mac development scratch (superseded by results/final/ and results/linux/)
 results/compare_v1_endreport/
 results/smoke/ramp_ctl_*
+results/trace/*.pcap
